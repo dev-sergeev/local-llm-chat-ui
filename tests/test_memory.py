@@ -66,6 +66,10 @@ def test_edit_and_regenerate_create_navigable_branches(tmp_path):
     ]
     assert active.messages[0].variant_index == 2
     assert active.messages[0].variant_count == 2
+    assert active.messages[0].variant_ids == (
+        first.prompt_message_id,
+        edited.prompt_message_id,
+    )
 
     memory.select_variant(conversation.id, first.prompt_message_id)
     original = memory.get_conversation(conversation.id)
@@ -83,6 +87,7 @@ def test_edit_and_regenerate_create_navigable_branches(tmp_path):
     assert alternative.messages[-1].id == second_answer.id
     assert alternative.messages[-1].variant_index == 2
     assert alternative.messages[-1].variant_count == 2
+    assert alternative.messages[-1].variant_ids == (edited_answer.id, second_answer.id)
 
     memory.select_variant(conversation.id, edited_answer.id)
     selected_first_answer = memory.get_conversation(conversation.id)

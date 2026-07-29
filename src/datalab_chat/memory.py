@@ -78,6 +78,7 @@ class MessageView:
     created_at: str
     variant_index: int
     variant_count: int
+    variant_ids: tuple[str, ...]
 
     def to_public_dict(self) -> dict[str, object]:
         return {
@@ -89,6 +90,7 @@ class MessageView:
             "created_at": self.created_at,
             "variant_index": self.variant_index,
             "variant_count": self.variant_count,
+            "variant_ids": list(self.variant_ids),
         }
 
 
@@ -801,6 +803,7 @@ class SQLiteChatMemory:
             created_at=row["created_at"],
             variant_index=sibling_ids.index(row["id"]) + 1,
             variant_count=len(sibling_ids),
+            variant_ids=tuple(sibling_ids),
         )
 
     def _active_path_rows(
