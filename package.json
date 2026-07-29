@@ -1,9 +1,8 @@
 {
-  "name": "datalab-risk-chat-ui",
+  "name": "local-llm-chat-ui",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test tests/js/*.test.mjs"
   }
 }
-

@@ -8,9 +8,10 @@ import shlex
 import tempfile
 import threading
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from datalab_chat.compat import StrEnum
 
 
 class ProfileError(Exception):

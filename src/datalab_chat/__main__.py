@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         actual_port = server.server_address[1]
         display_host = "127.0.0.1" if args.host == "localhost" else args.host
         url = f"http://{display_host}:{actual_port}"
-        print(f"DataLab Risk Chat запущен: {url}", flush=True)
+        print(f"Local LLM Chat запущен: {url}", flush=True)
         LOGGER.info("Service started on localhost port %s", actual_port)
         if not args.no_browser:
             timer = threading.Timer(0.45, _open_browser_safely, args=(url,))
@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="datalab-risk-chat",
+        prog="local-llm-chat",
         description="Локальный UI для GigaChat и OpenAI-compatible моделей.",
     )
     parser.add_argument("--version", action="version", version=__version__)

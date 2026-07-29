@@ -1,6 +1,8 @@
 .env
 .data/
 .venv/
+.uv-venv/
+/uv.lock
 __pycache__/
 .pytest_cache/
 node_modules/

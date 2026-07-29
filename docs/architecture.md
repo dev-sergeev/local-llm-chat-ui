@@ -1,6 +1,6 @@
 # Architecture and test seams
 
-DataLab Risk Chat runs as one local Python process. A standard-library HTTP adapter serves a prebuilt vanilla-JavaScript UI and translates JSON requests into the typed interface of the application module. The application module owns all ordering, validation and failure semantics.
+Local LLM Chat UI runs as one local Python process. A standard-library HTTP adapter serves a prebuilt vanilla-JavaScript UI and translates JSON requests into the typed interface of the application module. The application module owns all ordering, validation and failure semantics.
 
 The agreed test seams are:
 

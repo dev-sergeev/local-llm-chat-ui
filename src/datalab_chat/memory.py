@@ -7,11 +7,11 @@ import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from datalab_chat.compat import StrEnum
 from datalab_chat.profiles import ModelSnapshot
 
 
@@ -1478,7 +1478,7 @@ class SQLiteChatMemory:
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _validated_content(content: str) -> str:
