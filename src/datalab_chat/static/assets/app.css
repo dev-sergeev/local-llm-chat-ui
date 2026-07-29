@@ -886,6 +886,54 @@ kbd {
   border-top: 1px solid var(--border);
 }
 
+.table-scroll {
+  width: 100%;
+  max-width: 100%;
+  margin: 14px 0;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
+}
+
+.markdown-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.93em;
+  line-height: 1.5;
+}
+
+.markdown-table th,
+.markdown-table td {
+  min-width: 112px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  vertical-align: top;
+  text-align: left;
+}
+
+.markdown-table th {
+  background: var(--surface-soft);
+  font-weight: 750;
+}
+
+.markdown-table tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--surface-soft) 55%, transparent);
+}
+
+.markdown-table .table-align-center {
+  text-align: center;
+}
+
+.markdown-table .table-align-right {
+  text-align: right;
+}
+
+.markdown-table .table-align-left {
+  text-align: left;
+}
+
 .code-block {
   margin: 14px 0;
   overflow: hidden;

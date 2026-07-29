@@ -55,6 +55,13 @@ export function renderMarkdown(source) {
         continue;
       }
 
+      const table = parseTable(lines, index);
+      if (table !== null) {
+        output.push(table.html);
+        index = table.nextIndex;
+        continue;
+      }
+
       const heading = /^(#{1,6})\s+(.+)$/.exec(line);
       if (heading) {
         const level = heading[1].length;
@@ -100,7 +107,12 @@ export function renderMarkdown(source) {
       }
 
       const paragraph = [];
-      while (index < lines.length && lines[index].trim() && !isBlockStart(lines[index])) {
+      while (
+        index < lines.length &&
+        lines[index].trim() &&
+        !isBlockStart(lines[index]) &&
+        parseTable(lines, index) === null
+      ) {
         paragraph.push(lines[index]);
         index += 1;
       }
@@ -130,10 +142,12 @@ function renderInline(source) {
   text = text.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (_match, label, rawUrl) => {
     const safe = safeExternalUrl(rawUrl);
     if (!safe) return label;
+    const safeLabel = escapeHtml(label).replace(/\\\|/g, "|");
     return protect(
-      `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`,
+      `<a href="${escapeHtml(safe)}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`,
     );
   });
+  text = text.replace(/\\\|/g, () => protect("|"));
   text = escapeHtml(text);
   text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   text = text.replace(/__([^_\n]+)__/g, "<strong>$1</strong>");
@@ -148,6 +162,119 @@ function renderInline(source) {
 function blockTokenIndex(line) {
   const match = new RegExp(`^${TOKEN_START}BLOCK(\\d+)${TOKEN_END}$`).exec(line);
   return match ? Number(match[1]) : null;
+}
+
+function parseTable(lines, startIndex) {
+  if (startIndex + 1 >= lines.length) return null;
+  if (isBlockStart(lines[startIndex])) return null;
+
+  const header = splitTableRow(lines[startIndex]);
+  const delimiter = splitTableRow(lines[startIndex + 1]);
+  if (!header.hasSeparator || !delimiter.hasSeparator || !header.cells.length) return null;
+  if (header.cells.length !== delimiter.cells.length) return null;
+
+  const alignments = delimiter.cells.map(parseTableAlignment);
+  if (alignments.some((alignment) => alignment === false)) return null;
+
+  const rows = [];
+  let nextIndex = startIndex + 2;
+  while (
+    nextIndex < lines.length &&
+    lines[nextIndex].trim() &&
+    !isBlockStart(lines[nextIndex])
+  ) {
+    const row = splitTableRow(lines[nextIndex]);
+    if (!row.hasSeparator) break;
+    rows.push(normalizeTableRow(row.cells, header.cells.length));
+    nextIndex += 1;
+  }
+
+  const headerHtml = header.cells
+    .map((cell, cellIndex) => renderTableCell("th", cell, alignments[cellIndex]))
+    .join("");
+  const bodyHtml = rows
+    .map((row) => {
+      const cells = row
+        .map((cell, cellIndex) => renderTableCell("td", cell, alignments[cellIndex]))
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+
+  return {
+    html: `<div class="table-scroll" role="region" aria-label="Таблица" tabindex="0"><table class="markdown-table"><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`,
+    nextIndex,
+  };
+}
+
+function splitTableRow(source) {
+  const line = String(source).trim();
+  const cells = [];
+  let cell = "";
+  let codeFenceLength = 0;
+  let hasSeparator = false;
+  let startsWithSeparator = false;
+  let endsWithSeparator = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+
+    if (character === "\\" && index + 1 < line.length) {
+      cell += character + line[index + 1];
+      index += 1;
+      endsWithSeparator = false;
+      continue;
+    }
+
+    if (character === "`") {
+      let fenceLength = 1;
+      while (line[index + fenceLength] === "`") fenceLength += 1;
+      const fence = "`".repeat(fenceLength);
+      cell += fence;
+      if (codeFenceLength === 0) codeFenceLength = fenceLength;
+      else if (codeFenceLength === fenceLength) codeFenceLength = 0;
+      index += fenceLength - 1;
+      endsWithSeparator = false;
+      continue;
+    }
+
+    if (character === "|" && codeFenceLength === 0) {
+      if (!hasSeparator) startsWithSeparator = index === 0;
+      hasSeparator = true;
+      cells.push(cell.trim());
+      cell = "";
+      endsWithSeparator = index === line.length - 1;
+      continue;
+    }
+
+    cell += character;
+    endsWithSeparator = false;
+  }
+
+  cells.push(cell.trim());
+  if (startsWithSeparator) cells.shift();
+  if (endsWithSeparator) cells.pop();
+  return { cells, hasSeparator };
+}
+
+function parseTableAlignment(source) {
+  const delimiter = String(source).trim();
+  if (!/^:?-{3,}:?$/.test(delimiter)) return false;
+  if (delimiter.startsWith(":") && delimiter.endsWith(":")) return "center";
+  if (delimiter.endsWith(":")) return "right";
+  if (delimiter.startsWith(":")) return "left";
+  return null;
+}
+
+function normalizeTableRow(cells, expectedLength) {
+  const normalized = cells.slice(0, expectedLength);
+  while (normalized.length < expectedLength) normalized.push("");
+  return normalized;
+}
+
+function renderTableCell(tag, content, alignment) {
+  const classAttribute = alignment ? ` class="table-align-${alignment}"` : "";
+  return `<${tag}${classAttribute}>${renderInline(content)}</${tag}>`;
 }
 
 function isBlockStart(line) {
