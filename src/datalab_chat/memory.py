@@ -45,11 +45,21 @@ class GenerationStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class QueuedMessageStatus(StrEnum):
+    WAITING = "waiting"
+    BLOCKED = "blocked"
+
+
 _PENDING_STATUSES = (
     GenerationStatus.QUEUED.value,
     GenerationStatus.RUNNING.value,
     GenerationStatus.RETRYING.value,
 )
+_RECOVERY_INTERRUPTED_STATUSES = (
+    GenerationStatus.RUNNING.value,
+    GenerationStatus.RETRYING.value,
+)
+_MAX_QUEUED_MESSAGES = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +114,7 @@ class GenerationView:
     conversation_id: str
     prompt_message_id: str
     profile_id: str
+    profile_revision: str | None
     status: GenerationStatus
     attempts: int
     error_code: str | None
@@ -115,6 +126,7 @@ class GenerationView:
 
     def to_public_dict(self) -> dict[str, object]:
         return {
+            "kind": "generation",
             "id": self.id,
             "conversation_id": self.conversation_id,
             "prompt_message_id": self.prompt_message_id,
@@ -131,6 +143,38 @@ class GenerationView:
 
 
 @dataclass(frozen=True, slots=True)
+class QueuedMessageView:
+    id: str
+    conversation_id: str
+    content: str
+    profile_id: str
+    profile_revision: str | None
+    model_snapshot: ModelSnapshot | None
+    status: QueuedMessageStatus
+    error_code: str | None
+    error_message: str | None
+    created_at: str
+    updated_at: str
+
+    def to_public_dict(self) -> dict[str, object]:
+        return {
+            "kind": "queued_message",
+            "id": self.id,
+            "conversation_id": self.conversation_id,
+            "content": self.content,
+            "profile_id": self.profile_id,
+            "model_snapshot": (
+                self.model_snapshot.to_public_dict() if self.model_snapshot else None
+            ),
+            "status": self.status.value,
+            "error_code": self.error_code,
+            "error_message": self.error_message,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationView:
     id: str
     title: str
@@ -139,6 +183,7 @@ class ConversationView:
     updated_at: str
     messages: tuple[MessageView, ...]
     active_generation: GenerationView | None
+    queued_messages: tuple[QueuedMessageView, ...]
 
     def to_public_dict(self) -> dict[str, object]:
         return {
@@ -153,13 +198,14 @@ class ConversationView:
                 if self.active_generation
                 else None
             ),
+            "queued_messages": [item.to_public_dict() for item in self.queued_messages],
         }
 
 
 class SQLiteChatMemory:
     """Persistent branching conversations behind transactional user operations."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -212,6 +258,17 @@ class SQLiteChatMemory:
                 conversation_id,
                 row["active_leaf_id"],
             )
+            queued_messages = tuple(
+                self._queued_message_view(item)
+                for item in connection.execute(
+                    """
+                    SELECT * FROM queued_messages
+                    WHERE conversation_id = ?
+                    ORDER BY ordinal
+                    """,
+                    (conversation_id,),
+                ).fetchall()
+            )
         return ConversationView(
             id=row["id"],
             title=row["title"],
@@ -220,6 +277,7 @@ class SQLiteChatMemory:
             updated_at=row["updated_at"],
             messages=messages,
             active_generation=active_generation,
+            queued_messages=queued_messages,
         )
 
     def rename_conversation(
@@ -278,13 +336,29 @@ class SQLiteChatMemory:
 
     def clear_profile_references(self, profile_id: str) -> None:
         with self._write() as connection:
+            timestamp = _now()
             connection.execute(
                 """
                 UPDATE conversations
                 SET active_profile_id = NULL, updated_at = ?
                 WHERE active_profile_id = ?
                 """,
-                (_now(), profile_id),
+                (timestamp, profile_id),
+            )
+            connection.execute(
+                """
+                UPDATE queued_messages
+                SET status = ?, error_code = 'profile_not_found',
+                    error_message = ?, updated_at = ?
+                WHERE profile_id = ? AND status = ?
+                """,
+                (
+                    QueuedMessageStatus.BLOCKED.value,
+                    "Профиль удалён. Уберите сообщение из очереди и отправьте его снова.",
+                    timestamp,
+                    profile_id,
+                    QueuedMessageStatus.WAITING.value,
+                ),
             )
 
     def delete_conversation(self, conversation_id: str) -> None:
@@ -299,47 +373,226 @@ class SQLiteChatMemory:
         conversation_id: str,
         content: str,
         profile_id: str,
+        profile_revision: str | None = None,
     ) -> GenerationView:
         clean_content = _validated_content(content)
         _validated_profile_id(profile_id)
         with self._write() as connection:
             conversation = self._conversation_row(connection, conversation_id)
             self._assert_no_pending_generation(connection, conversation_id)
-            message_id = self._insert_message(
+            row = self._begin_user_generation_in_transaction(
                 connection,
-                conversation_id=conversation_id,
-                parent_id=conversation["active_leaf_id"],
-                role="user",
-                content=clean_content,
-                model_snapshot=None,
+                conversation,
+                clean_content,
+                profile_id,
+                profile_revision,
             )
-            title = conversation["title"]
-            if conversation["title_is_auto"]:
-                title = _automatic_title(clean_content)
-            timestamp = _now()
-            connection.execute(
-                """
-                UPDATE conversations
-                SET active_leaf_id = ?, active_profile_id = ?, title = ?,
-                    title_is_auto = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (message_id, profile_id, title, timestamp, conversation_id),
+        return self._generation_view(row)
+
+    def submit_user_message(
+        self,
+        conversation_id: str,
+        content: str,
+        profile_id: str,
+        model_snapshot: ModelSnapshot | None = None,
+        profile_revision: str | None = None,
+    ) -> GenerationView | QueuedMessageView:
+        clean_content = _validated_content(content)
+        _validated_profile_id(profile_id)
+        if model_snapshot is not None and not isinstance(model_snapshot, ModelSnapshot):
+            raise MemoryValidationError("Снимок модели очереди имеет неверный формат.")
+        with self._write() as connection:
+            conversation = self._conversation_row(connection, conversation_id)
+            if self._has_pending_generation(
+                connection, conversation_id
+            ) or self._has_queued_messages(connection, conversation_id):
+                count = connection.execute(
+                    "SELECT COUNT(*) FROM queued_messages WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()[0]
+                if count >= _MAX_QUEUED_MESSAGES:
+                    raise MemoryConflict(
+                        "В очереди диалога уже слишком много сообщений."
+                    )
+                queued_id = uuid.uuid4().hex
+                timestamp = _now()
+                connection.execute(
+                    """
+                    INSERT INTO queued_messages (
+                        id, conversation_id, content, profile_id, profile_revision,
+                        model_snapshot, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        queued_id,
+                        conversation_id,
+                        clean_content,
+                        profile_id,
+                        profile_revision,
+                        (
+                            json.dumps(
+                                model_snapshot.to_public_dict(), ensure_ascii=False
+                            )
+                            if model_snapshot
+                            else None
+                        ),
+                        QueuedMessageStatus.WAITING.value,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE conversations
+                    SET active_profile_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (profile_id, timestamp, conversation_id),
+                )
+                queued = self._queued_message_row(connection, queued_id)
+                return self._queued_message_view(queued)
+
+            generation = self._begin_user_generation_in_transaction(
+                connection,
+                conversation,
+                clean_content,
+                profile_id,
+                profile_revision,
             )
-            generation_id = self._insert_generation(
+        return self._generation_view(generation)
+
+    def activate_next_queued_message(
+        self,
+        conversation_id: str,
+        expected_queued_message_id: str | None = None,
+    ) -> GenerationView | None:
+        with self._write() as connection:
+            conversation = self._conversation_row(connection, conversation_id)
+            if self._has_pending_generation(connection, conversation_id):
+                return None
+            active_generation = self._active_generation_for_leaf(
                 connection,
                 conversation_id,
-                message_id,
-                profile_id,
+                conversation["active_leaf_id"],
             )
-            row = self._generation_row(connection, generation_id)
-        return self._generation_view(row)
+            if active_generation and active_generation.status in {
+                GenerationStatus.FAILED,
+                GenerationStatus.INTERRUPTED,
+            }:
+                return None
+            queued = connection.execute(
+                """
+                SELECT * FROM queued_messages
+                WHERE conversation_id = ?
+                ORDER BY ordinal
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if (
+                queued is None
+                or queued["status"] != QueuedMessageStatus.WAITING.value
+                or (
+                    expected_queued_message_id is not None
+                    and queued["id"] != expected_queued_message_id
+                )
+            ):
+                return None
+            generation = self._begin_user_generation_in_transaction(
+                connection,
+                conversation,
+                queued["content"],
+                queued["profile_id"],
+                queued["profile_revision"],
+                update_active_profile=False,
+            )
+            connection.execute(
+                "DELETE FROM queued_messages WHERE id = ?",
+                (queued["id"],),
+            )
+        return self._generation_view(generation)
+
+    def next_queued_message(self, conversation_id: str) -> QueuedMessageView | None:
+        with self._read() as connection:
+            self._conversation_row(connection, conversation_id)
+            row = connection.execute(
+                """
+                SELECT * FROM queued_messages
+                WHERE conversation_id = ?
+                ORDER BY ordinal
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+        return self._queued_message_view(row) if row else None
+
+    def block_queued_message(
+        self,
+        queued_message_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+    ) -> QueuedMessageView:
+        with self._write() as connection:
+            self._queued_message_row(connection, queued_message_id)
+            connection.execute(
+                """
+                UPDATE queued_messages
+                SET status = ?, error_code = ?, error_message = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    QueuedMessageStatus.BLOCKED.value,
+                    error_code,
+                    error_message,
+                    _now(),
+                    queued_message_id,
+                ),
+            )
+            row = self._queued_message_row(connection, queued_message_id)
+        return self._queued_message_view(row)
+
+    def delete_queued_message(self, queued_message_id: str) -> None:
+        with self._write() as connection:
+            queued = self._queued_message_row(connection, queued_message_id)
+            connection.execute(
+                "DELETE FROM queued_messages WHERE id = ?",
+                (queued_message_id,),
+            )
+            connection.execute(
+                "UPDATE conversations SET updated_at = ? WHERE id = ?",
+                (_now(), queued["conversation_id"]),
+            )
+
+    def queued_conversation_ids(self) -> tuple[str, ...]:
+        with self._read() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT conversation_id FROM queued_messages
+                ORDER BY conversation_id
+                """
+            ).fetchall()
+        return tuple(row["conversation_id"] for row in rows)
+
+    def queued_generations(self) -> tuple[GenerationView, ...]:
+        with self._read() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM generations
+                WHERE status = ?
+                ORDER BY created_at, id
+                """,
+                (GenerationStatus.QUEUED.value,),
+            ).fetchall()
+        return tuple(self._generation_view(row) for row in rows)
 
     def begin_edit_generation(
         self,
         message_id: str,
         content: str,
         profile_id: str,
+        profile_revision: str | None = None,
     ) -> GenerationView:
         clean_content = _validated_content(content)
         _validated_profile_id(profile_id)
@@ -372,11 +625,17 @@ class SQLiteChatMemory:
                 conversation_id,
                 edited_id,
                 profile_id,
+                profile_revision,
             )
             row = self._generation_row(connection, generation_id)
         return self._generation_view(row)
 
-    def begin_regeneration(self, message_id: str, profile_id: str) -> GenerationView:
+    def begin_regeneration(
+        self,
+        message_id: str,
+        profile_id: str,
+        profile_revision: str | None = None,
+    ) -> GenerationView:
         _validated_profile_id(profile_id)
         with self._write() as connection:
             source = self._message_row(connection, message_id)
@@ -404,12 +663,16 @@ class SQLiteChatMemory:
                 conversation_id,
                 prompt["id"],
                 profile_id,
+                profile_revision,
             )
             row = self._generation_row(connection, generation_id)
         return self._generation_view(row)
 
     def begin_retry_generation(
-        self, generation_id: str, profile_id: str
+        self,
+        generation_id: str,
+        profile_id: str,
+        profile_revision: str | None = None,
     ) -> GenerationView:
         _validated_profile_id(profile_id)
         with self._write() as connection:
@@ -438,6 +701,7 @@ class SQLiteChatMemory:
                 conversation_id,
                 prompt["id"],
                 profile_id,
+                profile_revision,
             )
             row = self._generation_row(connection, retry_id)
         return self._generation_view(row)
@@ -645,14 +909,32 @@ class SQLiteChatMemory:
                 f"""
                 UPDATE generations
                 SET status = ?, error_code = ?, error_message = ?, updated_at = ?
-                WHERE status IN ({",".join("?" for _ in _PENDING_STATUSES)})
+                WHERE status IN ({",".join("?" for _ in _RECOVERY_INTERRUPTED_STATUSES)})
                 """,
                 (
                     GenerationStatus.INTERRUPTED.value,
                     "process_interrupted",
                     "Генерация была прервана перезапуском сервиса.",
                     _now(),
-                    *_PENDING_STATUSES,
+                    *_RECOVERY_INTERRUPTED_STATUSES,
+                ),
+            )
+            return cursor.rowcount
+
+    def interrupt_pending_generations(self) -> int:
+        with self._write() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE generations
+                SET status = ?, error_code = ?, error_message = ?, updated_at = ?
+                WHERE status IN ({",".join("?" for _ in _RECOVERY_INTERRUPTED_STATUSES)})
+                """,
+                (
+                    GenerationStatus.INTERRUPTED.value,
+                    "process_interrupted",
+                    "Генерация была прервана остановкой локального сервиса.",
+                    _now(),
+                    *_RECOVERY_INTERRUPTED_STATUSES,
                 ),
             )
             return cursor.rowcount
@@ -664,13 +946,43 @@ class SQLiteChatMemory:
                 connection = self._connect()
                 try:
                     version = connection.execute("PRAGMA user_version").fetchone()[0]
-                    if version not in (0, self._SCHEMA_VERSION):
+                    if version not in (0, 1, self._SCHEMA_VERSION):
                         raise MemoryStorageError(
                             "Версия локальной базы данных не поддерживается."
                         )
+                    migration_statements: list[str] = []
+                    if version in (0, 1, self._SCHEMA_VERSION):
+                        generation_columns = {
+                            row["name"]
+                            for row in connection.execute(
+                                "PRAGMA table_info(generations)"
+                            ).fetchall()
+                        }
+                        if (
+                            generation_columns
+                            and "profile_revision" not in generation_columns
+                        ):
+                            migration_statements.append(
+                                "ALTER TABLE generations ADD COLUMN profile_revision TEXT;"
+                            )
+                        queue_columns = {
+                            row["name"]
+                            for row in connection.execute(
+                                "PRAGMA table_info(queued_messages)"
+                            ).fetchall()
+                        }
+                        if queue_columns and "profile_revision" not in queue_columns:
+                            migration_statements.append(
+                                "ALTER TABLE queued_messages ADD COLUMN profile_revision TEXT;"
+                            )
+                    migration_sql = "\n".join(migration_statements)
                     connection.execute("PRAGMA journal_mode = WAL")
                     connection.executescript(
-                        """
+                        f"""
+                        BEGIN IMMEDIATE;
+
+                        {migration_sql}
+
                         CREATE TABLE IF NOT EXISTS conversations (
                             id TEXT PRIMARY KEY,
                             title TEXT NOT NULL,
@@ -698,6 +1010,7 @@ class SQLiteChatMemory:
                                 REFERENCES conversations(id) ON DELETE CASCADE,
                             prompt_message_id TEXT NOT NULL REFERENCES messages(id),
                             profile_id TEXT NOT NULL,
+                            profile_revision TEXT,
                             status TEXT NOT NULL,
                             attempts INTEGER NOT NULL DEFAULT 0,
                             error_code TEXT,
@@ -708,14 +1021,37 @@ class SQLiteChatMemory:
                             updated_at TEXT NOT NULL
                         );
 
+                        CREATE TABLE IF NOT EXISTS queued_messages (
+                            ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+                            id TEXT NOT NULL UNIQUE,
+                            conversation_id TEXT NOT NULL
+                                REFERENCES conversations(id) ON DELETE CASCADE,
+                            content TEXT NOT NULL,
+                            profile_id TEXT NOT NULL,
+                            profile_revision TEXT,
+                            model_snapshot TEXT,
+                            status TEXT NOT NULL
+                                CHECK (status IN ('waiting', 'blocked')),
+                            error_code TEXT,
+                            error_message TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        );
+
                         CREATE INDEX IF NOT EXISTS idx_messages_conversation_parent
                             ON messages(conversation_id, parent_id, created_at);
                         CREATE INDEX IF NOT EXISTS idx_generations_conversation_status
                             ON generations(conversation_id, status, created_at);
+                        CREATE INDEX IF NOT EXISTS idx_queued_messages_conversation
+                            ON queued_messages(conversation_id, ordinal);
+
+                        PRAGMA user_version = {self._SCHEMA_VERSION};
+                        COMMIT;
                         """
                     )
-                    connection.execute(f"PRAGMA user_version = {self._SCHEMA_VERSION}")
                 finally:
+                    if connection.in_transaction:
+                        connection.rollback()
                     connection.close()
                 self._secure_database_files()
             except MemoryError:
@@ -818,6 +1154,19 @@ class SQLiteChatMemory:
             raise MemoryNotFound("Генерация не найдена.")
         return row
 
+    def _queued_message_row(
+        self,
+        connection: sqlite3.Connection,
+        queued_message_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT * FROM queued_messages WHERE id = ?",
+            (queued_message_id,),
+        ).fetchone()
+        if row is None:
+            raise MemoryNotFound("Сообщение в очереди не найдено.")
+        return row
+
     def _conversation_summary(self, row: sqlite3.Row) -> ConversationSummary:
         return ConversationSummary(
             id=row["id"],
@@ -833,12 +1182,39 @@ class SQLiteChatMemory:
             conversation_id=row["conversation_id"],
             prompt_message_id=row["prompt_message_id"],
             profile_id=row["profile_id"],
+            profile_revision=row["profile_revision"],
             status=GenerationStatus(row["status"]),
             attempts=row["attempts"],
             error_code=row["error_code"],
             error_message=row["error_message"],
             response_message_id=row["response_message_id"],
             cancel_requested=bool(row["cancel_requested"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def _queued_message_view(self, row: sqlite3.Row) -> QueuedMessageView:
+        try:
+            snapshot = (
+                ModelSnapshot.from_dict(json.loads(row["model_snapshot"]))
+                if row["model_snapshot"]
+                else None
+            )
+            status = QueuedMessageStatus(row["status"])
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise MemoryStorageError(
+                "Сохранённый снимок модели очереди повреждён."
+            ) from exc
+        return QueuedMessageView(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            content=row["content"],
+            profile_id=row["profile_id"],
+            profile_revision=row["profile_revision"],
+            model_snapshot=snapshot,
+            status=status,
+            error_code=row["error_code"],
+            error_message=row["error_message"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -927,6 +1303,14 @@ class SQLiteChatMemory:
         connection: sqlite3.Connection,
         conversation_id: str,
     ) -> None:
+        if self._has_pending_generation(connection, conversation_id):
+            raise MemoryConflict("В диалоге уже выполняется генерация.")
+
+    def _has_pending_generation(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+    ) -> bool:
         row = connection.execute(
             f"""
             SELECT id FROM generations
@@ -935,12 +1319,73 @@ class SQLiteChatMemory:
             """,
             (conversation_id, *_PENDING_STATUSES),
         ).fetchone()
-        if row is not None:
-            raise MemoryConflict("В диалоге уже выполняется генерация.")
+        return row is not None
+
+    def _has_queued_messages(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+    ) -> bool:
+        row = connection.execute(
+            "SELECT 1 FROM queued_messages WHERE conversation_id = ? LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+        return row is not None
 
     def _assert_pending(self, row: sqlite3.Row) -> None:
         if row["status"] not in _PENDING_STATUSES:
             raise MemoryConflict("Генерация уже завершена.")
+
+    def _begin_user_generation_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        conversation: sqlite3.Row,
+        content: str,
+        profile_id: str,
+        profile_revision: str | None,
+        *,
+        update_active_profile: bool = True,
+    ) -> sqlite3.Row:
+        conversation_id = conversation["id"]
+        message_id = self._insert_message(
+            connection,
+            conversation_id=conversation_id,
+            parent_id=conversation["active_leaf_id"],
+            role="user",
+            content=content,
+            model_snapshot=None,
+        )
+        title = conversation["title"]
+        if conversation["title_is_auto"]:
+            title = _automatic_title(content)
+        timestamp = _now()
+        connection.execute(
+            """
+            UPDATE conversations
+            SET active_leaf_id = ?, active_profile_id = ?, title = ?,
+                title_is_auto = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                message_id,
+                (
+                    profile_id
+                    if update_active_profile
+                    else conversation["active_profile_id"]
+                ),
+                title,
+                timestamp,
+                conversation_id,
+            ),
+        )
+        generation_id = self._insert_generation(
+            connection,
+            conversation_id,
+            message_id,
+            profile_id,
+            profile_revision,
+        )
+        return self._generation_row(connection, generation_id)
 
     def _insert_message(
         self,
@@ -981,21 +1426,23 @@ class SQLiteChatMemory:
         conversation_id: str,
         prompt_message_id: str,
         profile_id: str,
+        profile_revision: str | None,
     ) -> str:
         generation_id = uuid.uuid4().hex
         timestamp = _now()
         connection.execute(
             """
             INSERT INTO generations (
-                id, conversation_id, prompt_message_id, profile_id, status,
-                attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                id, conversation_id, prompt_message_id, profile_id,
+                profile_revision, status, attempts, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
             """,
             (
                 generation_id,
                 conversation_id,
                 prompt_message_id,
                 profile_id,
+                profile_revision,
                 GenerationStatus.QUEUED.value,
                 timestamp,
                 timestamp,

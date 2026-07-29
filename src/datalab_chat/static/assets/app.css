@@ -775,6 +775,36 @@ kbd {
   font-weight: 700;
 }
 
+.queue-badge {
+  padding: 2px 7px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.queued-message {
+  opacity: 0.82;
+}
+
+.message.user.queued-message .message-content {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+}
+
+.queued-message.blocked .queue-badge,
+.queue-error {
+  color: var(--danger);
+}
+
+.queue-error {
+  max-width: 680px;
+  margin-top: 6px;
+  font-size: 10px;
+  text-align: right;
+}
+
 .message-content {
   color: var(--text);
   font-size: 14px;

@@ -89,6 +89,105 @@ def test_blank_token_keeps_the_previous_secret_during_edit(tmp_path):
     assert connection.model_id == "new-id"
 
 
+def test_profile_revision_is_stable_on_reload_and_rotates_on_secret_update(tmp_path):
+    env_path = tmp_path / ".env"
+    catalog = EnvProfileCatalog(env_path)
+    profile = catalog.create(draft("Primary", ProfileFormat.GIGACHAT, "original"))
+    original_revision = catalog.resolve(profile.id).revision
+
+    assert len(original_revision) == 32
+    assert EnvProfileCatalog(env_path).resolve(profile.id).revision == original_revision
+
+    catalog.update(
+        profile.id,
+        draft("Primary", ProfileFormat.GIGACHAT, "rotated-secret"),
+    )
+    changed_revision = catalog.resolve(profile.id).revision
+
+    assert changed_revision != original_revision
+    assert "rotated-secret" not in changed_revision
+    assert "revision" not in catalog.get(profile.id).to_public_dict()
+
+
+def test_profile_revision_is_stable_for_identical_and_display_only_updates(tmp_path):
+    catalog = EnvProfileCatalog(tmp_path / ".env")
+    profile = catalog.create(draft("Primary", ProfileFormat.GIGACHAT, "original"))
+    original_revision = catalog.resolve(profile.id).revision
+
+    catalog.update(
+        profile.id,
+        draft("Primary", ProfileFormat.GIGACHAT, "original"),
+    )
+    assert catalog.resolve(profile.id).revision == original_revision
+
+    catalog.update(
+        profile.id,
+        draft(
+            "Primary renamed",
+            ProfileFormat.GIGACHAT,
+            "",
+            base_url="https://llm.bank.local/v1/",
+        ),
+    )
+    renamed = catalog.resolve(profile.id)
+    assert renamed.display_name == "Primary renamed"
+    assert renamed.revision == original_revision
+
+
+@pytest.mark.parametrize(
+    ("provider_format", "base_url", "token", "model_id"),
+    [
+        (
+            ProfileFormat.OPENAI,
+            "https://llm.bank.local/v1",
+            "original",
+            "risk-model",
+        ),
+        (
+            ProfileFormat.GIGACHAT,
+            "https://llm.bank.local/v2",
+            "original",
+            "risk-model",
+        ),
+        (
+            ProfileFormat.GIGACHAT,
+            "https://llm.bank.local/v1",
+            "rotated-secret",
+            "risk-model",
+        ),
+        (
+            ProfileFormat.GIGACHAT,
+            "https://llm.bank.local/v1",
+            "original",
+            "another-model",
+        ),
+    ],
+)
+def test_profile_revision_rotates_for_each_connection_change(
+    tmp_path,
+    provider_format,
+    base_url,
+    token,
+    model_id,
+):
+    catalog = EnvProfileCatalog(tmp_path / ".env")
+    profile = catalog.create(draft("Primary", ProfileFormat.GIGACHAT, "original"))
+    original_revision = catalog.resolve(profile.id).revision
+
+    catalog.update(
+        profile.id,
+        draft(
+            "Primary",
+            provider_format,
+            token,
+            base_url=base_url,
+            model_id=model_id,
+        ),
+    )
+
+    assert catalog.resolve(profile.id).revision != original_revision
+
+
 def test_catalog_preserves_unrelated_env_values_and_special_characters(tmp_path):
     env_path = tmp_path / ".env"
     env_path.write_text("BANK_CA_BUNDLE=/etc/bank/ca.pem\n", encoding="utf-8")

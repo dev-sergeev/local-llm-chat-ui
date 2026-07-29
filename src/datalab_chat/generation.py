@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 from datalab_chat.gateways import (
     BoundedGatewayCaller,
@@ -22,6 +24,9 @@ from datalab_chat.memory import (
     SQLiteChatMemory,
 )
 from datalab_chat.profiles import ModelConnection
+
+
+LOGGER = logging.getLogger("datalab_chat.generation")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +82,7 @@ class GenerationCoordinator:
         *,
         policy: GenerationPolicy | None = None,
         caller: BoundedGatewayCaller | None = None,
+        on_terminal: Callable[[str], None] | None = None,
     ):
         self._memory = memory
         self._gateway_factory = gateway_factory
@@ -84,8 +90,10 @@ class GenerationCoordinator:
         self._caller = caller or BoundedGatewayCaller(
             poll_interval_seconds=self._policy.poll_interval_seconds
         )
+        self._on_terminal = on_terminal
         self._tasks: dict[str, _Task] = {}
         self._lock = threading.RLock()
+        self._stopping = threading.Event()
 
     def submit(
         self,
@@ -94,12 +102,14 @@ class GenerationCoordinator:
         *,
         on_chunk: ChunkCallback | None = None,
     ) -> GenerationView:
-        generation = self._memory.get_generation(generation_id)
-        if generation.status is not GenerationStatus.QUEUED:
-            raise MemoryConflict("Запустить можно только новую генерацию.")
         with self._lock:
+            if self._stopping.is_set():
+                raise MemoryConflict("Координатор генераций уже остановлен.")
             if generation_id in self._tasks:
-                raise MemoryConflict("Генерация уже запущена.")
+                return self._memory.get_generation(generation_id)
+            generation = self._memory.get_generation(generation_id)
+            if generation.status is not GenerationStatus.QUEUED:
+                raise MemoryConflict("Запустить можно только новую генерацию.")
             if len(self._tasks) >= self._policy.max_concurrent_generations:
                 raise GenerationCapacityError(
                     "Слишком много одновременных генераций. Повторите запрос позже."
@@ -126,6 +136,14 @@ class GenerationCoordinator:
                 task.cancel_event.set()
         return self._memory.cancel_generation(generation_id)
 
+    def has_capacity(self) -> bool:
+        with self._lock:
+            return len(self._tasks) < self._policy.max_concurrent_generations
+
+    def is_registered(self, generation_id: str) -> bool:
+        with self._lock:
+            return generation_id in self._tasks
+
     def wait(self, generation_id: str, *, timeout: float | None = None) -> bool:
         with self._lock:
             task = self._tasks.get(generation_id)
@@ -140,14 +158,15 @@ class GenerationCoordinator:
 
     def shutdown(self, *, timeout: float = 2.0) -> None:
         with self._lock:
+            self._stopping.set()
             tasks = list(self._tasks.items())
             for _, task in tasks:
                 task.cancel_event.set()
-        for generation_id, task in tasks:
-            try:
-                self._memory.cancel_generation(generation_id)
-            except MemoryError:
-                pass
+        try:
+            self._memory.interrupt_pending_generations()
+        except MemoryError:
+            pass
+        for _, task in tasks:
             task.thread.join(timeout)
         with self._lock:
             self._tasks = {
@@ -169,6 +188,8 @@ class GenerationCoordinator:
             messages = self._memory.context_for_generation(generation_id)
             gateway = self._gateway_factory.create(connection)
             while attempts < self._policy.max_attempts:
+                if self._stopping.is_set():
+                    return
                 if self._cancelled(generation_id, cancel_event):
                     self._cancel_safely(generation_id)
                     return
@@ -178,7 +199,15 @@ class GenerationCoordinator:
                     return
 
                 attempts += 1
-                self._memory.mark_generation_running(generation_id, attempt=attempts)
+                # Linearize QUEUED -> RUNNING against shutdown. If shutdown wins,
+                # durable queued work stays resumable; if this transition wins,
+                # shutdown observes RUNNING and records it as interrupted.
+                with self._lock:
+                    if self._stopping.is_set():
+                        return
+                    self._memory.mark_generation_running(
+                        generation_id, attempt=attempts
+                    )
                 try:
                     answer = self._invoke_interruptibly(
                         gateway,
@@ -188,6 +217,8 @@ class GenerationCoordinator:
                         cancel_event=cancel_event,
                         on_chunk=on_chunk,
                     )
+                    if self._stopping.is_set():
+                        return
                     if self._cancelled(generation_id, cancel_event):
                         self._cancel_safely(generation_id)
                         return
@@ -198,7 +229,8 @@ class GenerationCoordinator:
                     )
                     return
                 except _Cancelled:
-                    self._cancel_safely(generation_id)
+                    if not self._stopping.is_set():
+                        self._cancel_safely(generation_id)
                     return
                 except _DeadlineExceeded:
                     self._fail_deadline(generation_id, attempts)
@@ -219,30 +251,55 @@ class GenerationCoordinator:
                         error_message=failure.message,
                     )
                     if not self._wait_backoff(attempts, deadline, cancel_event):
+                        if self._stopping.is_set():
+                            return
                         if self._cancelled(generation_id, cancel_event):
                             self._cancel_safely(generation_id)
                         else:
                             self._fail_deadline(generation_id, attempts)
                         return
         except GatewayFailure as failure:
-            self._fail_safely(
-                generation_id,
-                code=failure.code,
-                message=failure.message,
-                attempts=attempts,
-            )
+            if not self._stopping.is_set():
+                self._fail_safely(
+                    generation_id,
+                    code=failure.code,
+                    message=failure.message,
+                    attempts=attempts,
+                )
         except MemoryConflict:
             return
         except Exception:
-            self._fail_safely(
-                generation_id,
-                code="unexpected_provider_error",
-                message="Модель вернула непредвиденную ошибку.",
-                attempts=attempts,
-            )
+            if not self._stopping.is_set():
+                self._fail_safely(
+                    generation_id,
+                    code="unexpected_provider_error",
+                    message="Модель вернула непредвиденную ошибку.",
+                    attempts=attempts,
+                )
         finally:
             with self._lock:
                 self._tasks.pop(generation_id, None)
+            self._notify_terminal(generation_id)
+
+    def _notify_terminal(self, generation_id: str) -> None:
+        if self._on_terminal is None:
+            return
+        failure: Exception | None = None
+        for attempt in range(3):
+            try:
+                self._on_terminal(generation_id)
+                return
+            except Exception as exc:
+                failure = exc
+                if attempt < 2 and not self._stopping.wait(
+                    self._policy.poll_interval_seconds
+                ):
+                    continue
+                break
+        LOGGER.error(
+            "Generation terminal callback failed: %s",
+            type(failure).__name__,
+        )
 
     def _invoke_interruptibly(
         self,

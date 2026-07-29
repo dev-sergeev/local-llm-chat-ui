@@ -19,10 +19,10 @@
 
 - `GET /api/conversations?query=...` — список и поиск;
 - `POST /api/conversations` — новый диалог;
-- `GET /api/conversations/{id}` — активная ветка, варианты и состояние генерации;
+- `GET /api/conversations/{id}` — активная ветка, варианты, состояние генерации и `queued_messages`;
 - `PATCH /api/conversations/{id}` — атомарно изменить название и/или активный профиль;
 - `DELETE /api/conversations/{id}` — подтверждаемое удаление;
-- `POST /api/conversations/{id}/messages` — новое сообщение и фоновая генерация;
+- `POST /api/conversations/{id}/messages` — новая генерация либо устойчивое сообщение очереди, если диалог уже занят;
 - `POST /api/conversations/{id}/select` — выбрать версию сообщения и её последнюю ветку.
 
 ## Сообщения и генерации
@@ -32,5 +32,6 @@
 - `GET /api/generations/{id}` — `queued`, `running`, `retrying`, `succeeded`, `failed`, `cancelled` или `interrupted`;
 - `POST /api/generations/{id}/retry` — ручной повтор терминальной ошибки;
 - `POST /api/generations/{id}/cancel` — немедленно запретить сохранение ответа.
+- `DELETE /api/queued-messages/{id}` — убрать ещё не активированное сообщение из очереди.
 
 `GET /api/health` возвращает версию и готовность самого localhost-сервиса. Он не вызывает внешнюю модель.

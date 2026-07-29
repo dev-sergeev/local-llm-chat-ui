@@ -299,3 +299,76 @@ def test_thread_start_failure_releases_generation_capacity(tmp_path, monkeypatch
     coordinator.submit(generation.id, CONNECTION)
     assert coordinator.wait(generation.id, timeout=1)
     assert memory.get_generation(generation.id).status is GenerationStatus.SUCCEEDED
+
+
+def test_terminal_callback_failure_is_logged_without_secret_details(tmp_path, caplog):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    _, generation = new_generation(memory)
+
+    def fail_callback(_generation_id):
+        raise RuntimeError("secret callback details")
+
+    coordinator = GenerationCoordinator(
+        memory,
+        FixedFactory(ScriptedGateway(["Ответ сохранён"])),
+        policy=policy(),
+        on_terminal=fail_callback,
+    )
+
+    with caplog.at_level("ERROR", logger="datalab_chat.generation"):
+        coordinator.submit(generation.id, CONNECTION)
+        assert coordinator.wait(generation.id, timeout=1)
+
+    messages = "\n".join(caplog.messages)
+    assert "terminal callback failed" in messages.lower()
+    assert "RuntimeError" in messages
+    assert "secret callback details" not in messages
+
+
+def test_terminal_callback_is_retried_after_one_transient_failure(tmp_path):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    _, generation = new_generation(memory)
+    attempts = []
+
+    def flaky_callback(generation_id):
+        attempts.append(generation_id)
+        if len(attempts) == 1:
+            raise RuntimeError("temporary callback failure")
+
+    coordinator = GenerationCoordinator(
+        memory,
+        FixedFactory(ScriptedGateway(["Ответ сохранён"])),
+        policy=policy(),
+        on_terminal=flaky_callback,
+    )
+
+    coordinator.submit(generation.id, CONNECTION)
+    assert coordinator.wait(generation.id, timeout=1)
+
+    assert attempts == [generation.id, generation.id]
+
+
+def test_shutdown_does_not_turn_registered_queued_work_into_user_cancellation(
+    tmp_path,
+):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    _, generation = new_generation(memory)
+    factory_entered = threading.Event()
+    release_factory = threading.Event()
+
+    class PausedFactory:
+        def create(self, _connection):
+            factory_entered.set()
+            release_factory.wait(1)
+            return ScriptedGateway(["Ответ после следующего запуска"])
+
+    coordinator = GenerationCoordinator(memory, PausedFactory(), policy=policy())
+    coordinator.submit(generation.id, CONNECTION)
+    assert factory_entered.wait(0.5)
+    assert memory.get_generation(generation.id).status is GenerationStatus.QUEUED
+
+    coordinator.shutdown(timeout=0.01)
+    release_factory.set()
+    assert coordinator.wait(generation.id, timeout=1)
+
+    assert memory.get_generation(generation.id).status is GenerationStatus.QUEUED

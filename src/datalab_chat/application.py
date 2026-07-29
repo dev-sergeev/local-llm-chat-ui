@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass
 
@@ -20,6 +21,8 @@ from datalab_chat.memory import (
     ConversationView,
     GenerationView,
     MemoryError,
+    QueuedMessageStatus,
+    QueuedMessageView,
     SQLiteChatMemory,
 )
 from datalab_chat.profiles import (
@@ -60,6 +63,8 @@ class ChatApplication:
         self._profiles = profiles
         self._memory = memory
         self._gateway_factory = gateway_factory
+        self._lifecycle_lock = threading.RLock()
+        self._shutting_down = False
         resolved_policy = generation_policy or GenerationPolicy()
         self._caller = BoundedGatewayCaller(
             max_concurrent_calls=resolved_policy.max_concurrent_generations,
@@ -70,8 +75,11 @@ class ChatApplication:
             gateway_factory,
             policy=resolved_policy,
             caller=self._caller,
+            on_terminal=self._on_generation_terminal,
         )
         self._memory.recover_interrupted_generations()
+        self._resume_queued_generations()
+        self._pump_queued_messages()
 
     def list_profiles(self) -> list[ModelProfile]:
         return self._profiles.list()
@@ -83,16 +91,18 @@ class ChatApplication:
         return self._profiles.create(draft)
 
     def update_profile(self, profile_id: str, draft: ProfileDraft) -> ModelProfile:
-        return self._profiles.update(profile_id, draft)
+        with self._lifecycle_lock:
+            return self._profiles.update(profile_id, draft)
 
     def delete_profile(self, profile_id: str) -> None:
-        self._profiles.delete(profile_id)
-        try:
-            self._memory.clear_profile_references(profile_id)
-        except MemoryError:
-            # The secret is already removed. Stale non-secret IDs are harmless and
-            # are rejected on the next generation instead of restoring a secret.
-            pass
+        with self._lifecycle_lock:
+            self._profiles.delete(profile_id)
+            try:
+                self._memory.clear_profile_references(profile_id)
+            except MemoryError:
+                # The secret is already removed. Stale non-secret IDs are harmless and
+                # are rejected on the next generation instead of restoring a secret.
+                pass
 
     def test_profile(
         self,
@@ -213,14 +223,19 @@ class ChatApplication:
         conversation_id: str,
         content: str,
         profile_id: str | None = None,
-    ) -> GenerationView:
-        connection = self._connection_for_conversation(conversation_id, profile_id)
-        generation = self._memory.begin_user_generation(
-            conversation_id,
-            content,
-            connection.id,
-        )
-        return self._submit(generation, connection)
+    ) -> GenerationView | QueuedMessageView:
+        with self._lifecycle_lock:
+            connection = self._connection_for_conversation(conversation_id, profile_id)
+            result = self._memory.submit_user_message(
+                conversation_id,
+                content,
+                connection.id,
+                connection.snapshot(),
+                connection.revision,
+            )
+            if isinstance(result, QueuedMessageView):
+                return result
+            return self._submit(result, connection)
 
     def edit_message(
         self,
@@ -228,35 +243,47 @@ class ChatApplication:
         content: str,
         profile_id: str | None = None,
     ) -> GenerationView:
-        conversation = self._memory.conversation_for_message(message_id)
-        connection = self._connection_from_selection(conversation, profile_id)
-        generation = self._memory.begin_edit_generation(
-            message_id,
-            content,
-            connection.id,
-        )
-        return self._submit(generation, connection)
+        with self._lifecycle_lock:
+            conversation = self._memory.conversation_for_message(message_id)
+            connection = self._connection_from_selection(conversation, profile_id)
+            generation = self._memory.begin_edit_generation(
+                message_id,
+                content,
+                connection.id,
+                connection.revision,
+            )
+            return self._submit(generation, connection)
 
     def regenerate(
         self,
         message_id: str,
         profile_id: str | None = None,
     ) -> GenerationView:
-        conversation = self._memory.conversation_for_message(message_id)
-        connection = self._connection_from_selection(conversation, profile_id)
-        generation = self._memory.begin_regeneration(message_id, connection.id)
-        return self._submit(generation, connection)
+        with self._lifecycle_lock:
+            conversation = self._memory.conversation_for_message(message_id)
+            connection = self._connection_from_selection(conversation, profile_id)
+            generation = self._memory.begin_regeneration(
+                message_id,
+                connection.id,
+                connection.revision,
+            )
+            return self._submit(generation, connection)
 
     def retry_generation(
         self,
         generation_id: str,
         profile_id: str | None = None,
     ) -> GenerationView:
-        previous = self._memory.get_generation(generation_id)
-        conversation = self._memory.get_conversation(previous.conversation_id)
-        connection = self._connection_from_selection(conversation, profile_id)
-        generation = self._memory.begin_retry_generation(generation_id, connection.id)
-        return self._submit(generation, connection)
+        with self._lifecycle_lock:
+            previous = self._memory.get_generation(generation_id)
+            conversation = self._memory.get_conversation(previous.conversation_id)
+            connection = self._connection_from_selection(conversation, profile_id)
+            generation = self._memory.begin_retry_generation(
+                generation_id,
+                connection.id,
+                connection.revision,
+            )
+            return self._submit(generation, connection)
 
     def select_variant(self, conversation_id: str, message_id: str) -> ConversationView:
         return self._memory.select_variant(conversation_id, message_id)
@@ -265,10 +292,123 @@ class ChatApplication:
         return self._memory.get_generation(generation_id)
 
     def cancel_generation(self, generation_id: str) -> GenerationView:
-        return self._generations.cancel(generation_id)
+        with self._lifecycle_lock:
+            return self._generations.cancel(generation_id)
+
+    def delete_queued_message(self, queued_message_id: str) -> None:
+        with self._lifecycle_lock:
+            self._memory.delete_queued_message(queued_message_id)
+            self._pump_queued_messages()
 
     def shutdown(self) -> None:
+        with self._lifecycle_lock:
+            self._shutting_down = True
         self._generations.shutdown()
+
+    def _on_generation_terminal(self, generation_id: str) -> None:
+        with self._lifecycle_lock:
+            if self._shutting_down:
+                return
+            try:
+                conversation_id = self._memory.get_generation(
+                    generation_id
+                ).conversation_id
+            except MemoryError:
+                conversation_id = None
+            self._resume_queued_generations()
+            self._pump_queued_messages(conversation_id)
+
+    def _resume_queued_generations(self) -> None:
+        with self._lifecycle_lock:
+            if self._shutting_down:
+                return
+            for generation in self._memory.queued_generations():
+                if self._generations.is_registered(generation.id):
+                    continue
+                if not self._generations.has_capacity():
+                    return
+                try:
+                    connection = self._profiles.resolve(generation.profile_id)
+                except ProfileNotFound:
+                    self._memory.fail_generation(
+                        generation.id,
+                        error_code="profile_not_found",
+                        error_message=(
+                            "Профиль генерации удалён. Выберите модель и повторите запрос."
+                        ),
+                        attempts=0,
+                    )
+                    continue
+                if (
+                    generation.profile_revision is not None
+                    and generation.profile_revision != connection.revision
+                ):
+                    self._memory.fail_generation(
+                        generation.id,
+                        error_code="profile_changed",
+                        error_message=(
+                            "Профиль модели изменён после отправки. Повторите запрос явно."
+                        ),
+                        attempts=0,
+                    )
+                    continue
+                self._submit(generation, connection)
+
+    def _pump_queued_messages(
+        self, preferred_conversation_id: str | None = None
+    ) -> None:
+        with self._lifecycle_lock:
+            if self._shutting_down:
+                return
+            conversation_ids = list(self._memory.queued_conversation_ids())
+            if preferred_conversation_id in conversation_ids:
+                conversation_ids.remove(preferred_conversation_id)
+                conversation_ids.insert(0, preferred_conversation_id)
+            for conversation_id in conversation_ids:
+                if not self._generations.has_capacity():
+                    return
+                try:
+                    queued_message = self._memory.next_queued_message(conversation_id)
+                    if (
+                        queued_message is None
+                        or queued_message.status is QueuedMessageStatus.BLOCKED
+                    ):
+                        continue
+                    connection = self._profiles.resolve(queued_message.profile_id)
+                except ProfileNotFound:
+                    self._memory.block_queued_message(
+                        queued_message.id,
+                        error_code="profile_not_found",
+                        error_message=(
+                            "Профиль удалён. Уберите сообщение из очереди и отправьте его снова."
+                        ),
+                    )
+                    continue
+                except MemoryError:
+                    continue
+                if (
+                    queued_message.profile_revision is not None
+                    and queued_message.profile_revision != connection.revision
+                ):
+                    self._memory.block_queued_message(
+                        queued_message.id,
+                        error_code="profile_changed",
+                        error_message=(
+                            "Профиль модели изменён после отправки. "
+                            "Уберите сообщение из очереди и отправьте его снова."
+                        ),
+                    )
+                    continue
+                try:
+                    generation = self._memory.activate_next_queued_message(
+                        conversation_id,
+                        queued_message.id,
+                    )
+                except MemoryError:
+                    continue
+                if generation is None:
+                    continue
+                self._submit(generation, connection)
 
     def _connection_for_conversation(
         self,
@@ -296,21 +436,12 @@ class ChatApplication:
         try:
             self._generations.submit(generation.id, connection)
             return generation
-        except GenerationCapacityError as exc:
+        except GenerationCapacityError:
+            return generation
+        except Exception:
             return self._memory.fail_generation(
                 generation.id,
-                error_code="generation_capacity",
-                error_message=str(exc),
+                error_code="internal_start_error",
+                error_message="Не удалось запустить генерацию.",
                 attempts=0,
             )
-        except Exception:
-            try:
-                self._memory.fail_generation(
-                    generation.id,
-                    error_code="internal_start_error",
-                    error_message="Не удалось запустить генерацию.",
-                    attempts=0,
-                )
-            except MemoryError:
-                pass
-            raise

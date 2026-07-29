@@ -69,6 +69,7 @@ def test_frontend_assets_are_self_contained_and_do_not_reference_cdn():
         STATIC / "assets" / "app.css",
         STATIC / "assets" / "app.js",
         STATIC / "assets" / "markdown.js",
+        STATIC / "assets" / "ui-state.js",
     ]
     combined = "\n".join(path.read_text(encoding="utf-8") for path in assets)
 

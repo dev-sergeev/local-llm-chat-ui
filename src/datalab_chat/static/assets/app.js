@@ -1,6 +1,15 @@
 import { escapeHtml, renderMarkdown } from "/assets/markdown.js";
+import {
+  deriveComposerState,
+  mergeRejectedSubmissionDraft,
+  shouldAutoFollowConversation,
+  shouldPollConversation,
+  shouldRefreshAcceptedSubmission,
+  shouldRestoreRejectedSubmission,
+} from "/assets/ui-state.js";
 
 const PENDING_STATUSES = new Set(["queued", "running", "retrying"]);
+const BOTTOM_PROXIMITY_PX = 180;
 
 const elements = {
   sidebar: byId("sidebar"),
@@ -54,6 +63,7 @@ const state = {
   editingMessageId: null,
   searchTimer: null,
   pollTimer: null,
+  refreshRecoveryConversationId: null,
   busy: false,
 };
 
@@ -170,12 +180,7 @@ async function openConversation(conversationId, options = {}) {
   const { scroll = false, closeSidebar: shouldClose = true } = options;
   try {
     const conversation = await api(`/api/conversations/${conversationId}`);
-    state.current = conversation;
-    localStorage.setItem("datalab.currentConversation", conversation.id);
-    renderConversation({ scroll });
-    renderConversationList();
-    scheduleGenerationPoll();
-    if (shouldClose) closeSidebar();
+    showConversation(conversation, { scroll, closeSidebar: shouldClose });
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
       localStorage.removeItem("datalab.currentConversation");
@@ -188,11 +193,36 @@ async function openConversation(conversationId, options = {}) {
   }
 }
 
+async function refreshCurrentConversation(conversationId, options = {}) {
+  const conversation = await api(`/api/conversations/${conversationId}`);
+  if (!shouldRefreshAcceptedSubmission({
+    accepted: true,
+    originatingConversationId: conversationId,
+    currentConversationId: state.current?.id || null,
+  })) return false;
+  showConversation(conversation, {
+    scroll: options.scroll || false,
+    closeSidebar: false,
+  });
+  return true;
+}
+
+function showConversation(conversation, options = {}) {
+  const { scroll = false, closeSidebar: shouldClose = true } = options;
+  state.refreshRecoveryConversationId = null;
+  state.current = conversation;
+  localStorage.setItem("datalab.currentConversation", conversation.id);
+  renderConversation({ scroll });
+  renderConversationList();
+  scheduleGenerationPoll();
+  if (shouldClose) closeSidebar();
+}
+
 async function createConversation() {
   if (!state.profiles.length) {
     openModelDialog();
     toast("Сначала добавьте профиль модели.", "error");
-    return;
+    return null;
   }
   const profileId = elements.modelSelect.value || state.profiles[0].id;
   const conversation = await api("/api/conversations", {
@@ -203,11 +233,13 @@ async function createConversation() {
   await loadConversations();
   await openConversation(conversation.id, { scroll: true });
   elements.messageInput.focus();
+  return conversation.id;
 }
 
 function renderWelcome() {
   clearTimeout(state.pollTimer);
   state.pollTimer = null;
+  state.refreshRecoveryConversationId = null;
   state.current = null;
   elements.welcome.hidden = false;
   elements.chatView.hidden = true;
@@ -228,14 +260,21 @@ function renderConversation({ scroll = false } = {}) {
   elements.chatTitle.textContent = state.current.title;
   renderProfileOptions();
 
+  const preservedScrollTop = elements.messages.scrollTop;
   const messages = state.current.messages || [];
   const body = messages.length
     ? messages.map(renderMessage).join("")
     : renderEmptyConversation();
   const generation = renderGeneration(state.current.active_generation);
-  elements.messages.innerHTML = `<div class="messages-inner">${body}${generation}</div>`;
+  const queued = renderQueuedMessages(state.current.queued_messages || []);
+  elements.messages.innerHTML = `<div class="messages-inner">${body}${generation}${queued}</div>`;
   updateComposerState();
-  if (scroll) requestAnimationFrame(() => scrollToBottom(false));
+  if (scroll) {
+    requestAnimationFrame(() => scrollToBottom(false));
+  } else {
+    elements.messages.scrollTop = preservedScrollTop;
+    requestAnimationFrame(updateJumpButton);
+  }
 }
 
 function renderEmptyConversation() {
@@ -302,6 +341,29 @@ function renderGeneration(generation) {
   </div>`;
 }
 
+function renderQueuedMessages(queuedMessages) {
+  return queuedMessages
+    .map((message, index) => {
+      const profile = state.profiles.find((item) => item.id === message.profile_id);
+      const profileName = message.model_snapshot?.display_name || profile?.display_name || "Профиль недоступен";
+      const blocked = message.status === "blocked";
+      const queueLabel = blocked ? "Требует внимания" : `В очереди · ${index + 1}`;
+      const error = blocked && message.error_message
+        ? `<div class="queue-error">${escapeHtml(message.error_message)}</div>`
+        : "";
+      return `<article class="message user queued-message ${blocked ? "blocked" : ""}" data-queued-message="${message.id}">
+        <div class="message-avatar" aria-hidden="true">ВЫ</div>
+        <div class="message-card">
+          <div class="message-meta"><span class="message-role">Вы</span><span class="queue-badge">${queueLabel}</span><span class="model-snapshot">${escapeHtml(profileName)}</span></div>
+          <div class="message-content">${renderMarkdown(message.content)}</div>
+          ${error}
+          <div class="message-actions"><button class="message-action" type="button" data-action="remove-queued" data-queued-message-id="${message.id}">Убрать из очереди</button></div>
+        </div>
+      </article>`;
+    })
+    .join("");
+}
+
 function renderConversationList() {
   elements.conversationCount.textContent = String(state.conversations.length);
   if (!state.conversations.length) {
@@ -359,18 +421,18 @@ function renderProfileList() {
 
 function updateComposerState() {
   const generation = state.current?.active_generation;
-  const pending = generation && PENDING_STATUSES.has(generation.status);
-  elements.stopButton.hidden = !pending;
-  elements.sendButton.disabled = Boolean(pending || state.busy || !state.profiles.length);
-  elements.messageInput.disabled = Boolean(pending);
+  const composerState = deriveComposerState({
+    generationStatus: generation?.status || null,
+    busy: state.busy,
+    hasProfiles: Boolean(state.profiles.length),
+  });
+  elements.stopButton.hidden = composerState.stopHidden;
+  elements.sendButton.disabled = composerState.sendDisabled;
+  elements.sendButton.setAttribute("aria-label", composerState.sendLabel);
+  elements.sendButton.title = composerState.sendLabel;
+  elements.messageInput.disabled = composerState.inputDisabled;
   elements.modelSelect.disabled = !state.profiles.length;
-  if (pending) {
-    elements.composerStatus.textContent = generation.status === "retrying" ? "Временная ошибка — выполняется повтор" : "Запрос выполняется без streaming";
-  } else if (!state.profiles.length) {
-    elements.composerStatus.textContent = "Добавьте профиль модели, чтобы отправить сообщение";
-  } else {
-    elements.composerStatus.textContent = "Enter — отправить · Shift+Enter — новая строка";
-  }
+  elements.composerStatus.textContent = composerState.statusText;
 }
 
 async function sendMessage() {
@@ -380,19 +442,66 @@ async function sendMessage() {
     openModelDialog();
     throw new ApiError(400, "profile_required", "Сначала добавьте профиль модели.");
   }
+  let originatingConversationId = state.current?.id || null;
+  const selectedProfileId = elements.modelSelect.value;
+  let accepted = false;
   state.busy = true;
+  elements.messageInput.value = "";
+  resizeComposer();
   updateComposerState();
   try {
-    if (!state.current) await createConversation();
-    if (!state.current) return;
-    await api(`/api/conversations/${state.current.id}/messages`, {
-      method: "POST",
-      body: { content, profile_id: elements.modelSelect.value },
-    });
-    elements.messageInput.value = "";
-    resizeComposer();
-    await openConversation(state.current.id, { scroll: true, closeSidebar: false });
-    await loadConversations();
+    try {
+      if (!originatingConversationId) {
+        originatingConversationId = await createConversation();
+      }
+      if (!originatingConversationId) {
+        throw new ApiError(400, "conversation_required", "Не удалось создать диалог.");
+      }
+      await api(`/api/conversations/${originatingConversationId}/messages`, {
+        method: "POST",
+        body: { content, profile_id: selectedProfileId },
+      });
+      accepted = true;
+    } catch (error) {
+      if (shouldRestoreRejectedSubmission({
+        accepted,
+        originatingConversationId,
+        currentConversationId: state.current?.id || null,
+      })) {
+        elements.messageInput.value = mergeRejectedSubmissionDraft(
+          content,
+          elements.messageInput.value,
+        );
+        resizeComposer();
+      }
+      throw error;
+    }
+
+    if (shouldRefreshAcceptedSubmission({
+      accepted,
+      originatingConversationId,
+      currentConversationId: state.current?.id || null,
+    })) {
+      try {
+        const refreshed = await refreshCurrentConversation(
+          originatingConversationId,
+          { scroll: true },
+        );
+        if (refreshed && state.current?.id === originatingConversationId) {
+          await loadConversations();
+        }
+      } catch {
+        toast("Сообщение принято, обновить не удалось.", "error");
+        if (shouldRefreshAcceptedSubmission({
+          accepted,
+          originatingConversationId,
+          currentConversationId: state.current?.id || null,
+        })) {
+          state.refreshRecoveryConversationId = originatingConversationId;
+          scheduleGenerationPoll();
+        }
+      }
+    }
   } finally {
     state.busy = false;
     updateComposerState();
@@ -428,9 +537,16 @@ async function retryGeneration(generationId) {
 async function cancelGeneration() {
   const generation = state.current?.active_generation;
   if (!generation || !PENDING_STATUSES.has(generation.status)) return;
-  await api(`/api/generations/${generation.id}/cancel`, { method: "POST" });
+  const cancelled = await api(`/api/generations/${generation.id}/cancel`, { method: "POST" });
   await openConversation(state.current.id, { scroll: true, closeSidebar: false });
-  toast("Генерация отменена.");
+  toast(cancelled.status === "cancelled" ? "Генерация отменена." : "Ответ уже завершён.");
+}
+
+async function removeQueuedMessage(queuedMessageId) {
+  await api(`/api/queued-messages/${queuedMessageId}`, { method: "DELETE" });
+  await openConversation(state.current.id, { scroll: false, closeSidebar: false });
+  await loadConversations();
+  toast("Сообщение убрано из очереди.");
 }
 
 async function selectVariant(message, direction) {
@@ -449,7 +565,13 @@ function scheduleGenerationPoll() {
   clearTimeout(state.pollTimer);
   state.pollTimer = null;
   const generation = state.current?.active_generation;
-  if (!generation || !PENDING_STATUSES.has(generation.status)) return;
+  const queuedHead = state.current?.queued_messages?.[0];
+  if (!shouldPollConversation({
+    generationStatus: generation?.status || null,
+    queuedStatus: queuedHead?.status || null,
+    recoveryConversationId: state.refreshRecoveryConversationId,
+    currentConversationId: state.current?.id || null,
+  })) return;
   state.pollTimer = setTimeout(pollGeneration, 800);
 }
 
@@ -459,10 +581,19 @@ async function pollGeneration() {
   try {
     const conversation = await api(`/api/conversations/${conversationId}`);
     if (state.current?.id !== conversationId) return;
+    state.refreshRecoveryConversationId = null;
+    const wasNearBottom = isNearBottom();
     const wasPending = PENDING_STATUSES.has(state.current?.active_generation?.status);
-    state.current = conversation;
     const stillPending = PENDING_STATUSES.has(conversation.active_generation?.status);
-    renderConversation({ scroll: wasPending && !stillPending });
+    const shouldAutoFollow = shouldAutoFollowConversation({
+      wasNearBottom,
+      previousMessageCount: state.current?.messages?.length || 0,
+      nextMessageCount: conversation.messages?.length || 0,
+      wasPending,
+      isPending: stillPending,
+    });
+    state.current = conversation;
+    renderConversation({ scroll: shouldAutoFollow });
     if (!stillPending) await loadConversations();
   } catch (error) {
     if (!(error instanceof ApiError && error.code === "connection_error")) reportError(error);
@@ -497,6 +628,8 @@ function handleMessageAction(event) {
     guard(() => selectVariant(message, 1));
   } else if (action === "retry-generation") {
     guard(() => retryGeneration(button.dataset.generationId));
+  } else if (action === "remove-queued") {
+    guard(() => removeQueuedMessage(button.dataset.queuedMessageId));
   } else if (action === "use-prompt") {
     elements.messageInput.value = button.dataset.prompt || "";
     resizeComposer();
@@ -746,8 +879,12 @@ function resizeComposer() {
 }
 
 function updateJumpButton() {
+  elements.jumpBottom.hidden = isNearBottom();
+}
+
+function isNearBottom() {
   const distance = elements.messages.scrollHeight - elements.messages.scrollTop - elements.messages.clientHeight;
-  elements.jumpBottom.hidden = distance < 180;
+  return distance < BOTTOM_PROXIMITY_PX;
 }
 
 function scrollToBottom(smooth) {

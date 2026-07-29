@@ -12,7 +12,7 @@ import pytest
 from datalab_chat.application import ChatApplication
 from datalab_chat.generation import GenerationPolicy
 from datalab_chat.memory import SQLiteChatMemory
-from datalab_chat.profiles import EnvProfileCatalog
+from datalab_chat.profiles import EnvProfileCatalog, ProfileDraft, ProfileFormat
 from datalab_chat.web import create_server
 
 
@@ -22,6 +22,8 @@ class WebGateway:
 
     def complete(self, messages, *, timeout_seconds, on_chunk=None):
         answer = self.answers.pop(0)
+        if callable(answer):
+            answer = answer()
         if on_chunk is not None:
             on_chunk(answer)
         return answer
@@ -194,6 +196,85 @@ def test_unsaved_profile_values_can_be_checked_without_persistence(running_serve
     assert "draft-secret" not in json.dumps(checked)
     _, _, profiles = request(running_server, "GET", "/api/profiles")
     assert profiles == []
+
+
+def test_http_queues_and_removes_message_while_generation_is_running(tmp_path):
+    release = threading.Event()
+
+    def slow_answer():
+        release.wait(1)
+        return "Поздний ответ"
+
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "index.html").write_text("<!doctype html><title>DataLab</title>")
+    app = ChatApplication(
+        EnvProfileCatalog(tmp_path / ".env"),
+        SQLiteChatMemory(tmp_path / "chat.db"),
+        WebFactory(WebGateway([slow_answer])),
+        generation_policy=GenerationPolicy(
+            total_timeout_seconds=1,
+            max_attempts=1,
+            base_backoff_seconds=0,
+            max_backoff_seconds=0,
+            jitter_ratio=0,
+            poll_interval_seconds=0.005,
+        ),
+    )
+    profile = app.create_profile(
+        ProfileDraft(
+            display_name="Queue profile",
+            provider_format=ProfileFormat.OPENAI,
+            base_url="https://gateway.local/v1",
+            token="queue-secret",
+            model_id="queue-model",
+        )
+    )
+    conversation = app.create_conversation(profile.id)
+    first = app.send_message(conversation.id, "Первый")
+    deadline = time.monotonic() + 1
+    while (
+        app.get_generation(first.id).status.value == "queued"
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+
+    server = create_server(app, static_dir=static, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, _, queued = request(
+            base_url,
+            "POST",
+            f"/api/conversations/{conversation.id}/messages",
+            {"content": "Второй", "profile_id": profile.id},
+        )
+        assert status == 202
+        assert queued["kind"] == "queued_message"
+        assert queued["status"] == "waiting"
+        assert queued["content"] == "Второй"
+        assert "queue-secret" not in json.dumps(queued)
+
+        _, _, view = request(base_url, "GET", f"/api/conversations/{conversation.id}")
+        assert [item["id"] for item in view["queued_messages"]] == [queued["id"]]
+
+        status, _, body = request(
+            base_url,
+            "DELETE",
+            f"/api/queued-messages/{queued['id']}",
+            {},
+        )
+        assert status == 204
+        assert body is None
+        _, _, view = request(base_url, "GET", f"/api/conversations/{conversation.id}")
+        assert view["queued_messages"] == []
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        app.shutdown()
+        thread.join(1)
 
 
 def test_conversation_patch_rolls_back_all_fields_on_invalid_profile(running_server):

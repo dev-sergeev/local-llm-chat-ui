@@ -15,9 +15,9 @@ Tests replace only the true external LLM seam. SQLite and the filesystem are exe
 
 ## Module shape
 
-- The **application module** exposes user-intent methods and hides transactions, branch selection, profile resolution and generation scheduling.
+- The **application module** exposes user-intent methods and hides transactions, branch selection, profile resolution, FIFO activation and generation scheduling.
 - The **profile module** exposes safe profile summaries and an internal resolved connection; it hides parsing, atomic `.env` replacement and file permissions.
-- The **memory module** exposes transactional conversation operations, durable generation status and an idempotent recovery operation; it hides SQLite schema, recursive branch queries and migrations.
+- The **memory module** exposes transactional conversation operations, durable queued messages, generation status and an idempotent recovery operation; it hides SQLite schema, recursive branch queries and migrations. A queued message enters the branch only when the previous turn is terminal, so its LLM context includes the preceding assistant answer.
 - The **generation module** exposes scheduling, cancellation and bounded execution (four generation tasks and four provider calls by default); it hides retries, the ten-minute deadline, background threads and response persistence.
 - GigaChat and OpenAI-compatible **adapters** satisfy the same LLM interface at the true external seam. Its optional chunk callback already crosses the bounded execution queue, while current request–response adapters emit one complete chunk only after strict validation. A deterministic adapter occupies that seam in tests.
 - The **web module** is deliberately shallow glue. It owns HTTP concerns only and has no business decisions.

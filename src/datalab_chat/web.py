@@ -322,6 +322,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             generation = app.cancel_generation(cancel_match.group(1))
             return HTTPStatus.OK, generation.to_public_dict()
 
+        queued_match = re.fullmatch(r"/api/queued-messages/([0-9a-f]{32})", path)
+        if queued_match and method == "DELETE":
+            app.delete_queued_message(queued_match.group(1))
+            return HTTPStatus.NO_CONTENT, None
+
         raise RequestError(HTTPStatus.NOT_FOUND, "not_found", "Маршрут не найден.")
 
     def _profile_draft(self, body: dict[str, Any], *, creating: bool) -> ProfileDraft:

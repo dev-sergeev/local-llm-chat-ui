@@ -7,7 +7,7 @@ import secrets
 import shlex
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -109,6 +109,7 @@ class ModelConnection:
     base_url: str
     token: str
     model_id: str
+    revision: str = ""
 
     def summary(self) -> ModelProfile:
         return ModelProfile(
@@ -135,7 +136,7 @@ class EnvProfileCatalog:
     _END = "# END DATALAB RISK CHAT MANAGED PROFILES"
     _IDS_KEY = "DATALAB_PROFILE_IDS"
     _PROFILE_KEY = re.compile(
-        r"^DATALAB_PROFILE_([0-9a-f]{32})_(DISPLAY_NAME|FORMAT|BASE_URL|TOKEN|MODEL_ID)$"
+        r"^DATALAB_PROFILE_([0-9a-f]{32})_(DISPLAY_NAME|FORMAT|BASE_URL|TOKEN|MODEL_ID|REVISION)$"
     )
 
     def __init__(self, path: str | Path):
@@ -174,13 +175,17 @@ class EnvProfileCatalog:
         with self._lock:
             try:
                 existing_token = None
+                existing_revision = None
                 candidate_id = profile_id or secrets.token_hex(16)
                 if profile_id is not None:
-                    existing_token = self.resolve(profile_id).token
+                    existing = self.resolve(profile_id)
+                    existing_token = existing.token
+                    existing_revision = existing.revision
                 return self._validated_connection(
                     candidate_id,
                     draft,
                     existing_token=existing_token,
+                    revision=existing_revision,
                 )
             except ProfileError:
                 raise
@@ -215,7 +220,25 @@ class EnvProfileCatalog:
                         profile_id,
                         draft,
                         existing_token=current.token,
+                        revision=current.revision,
                     )
+                    current_connection = (
+                        current.provider_format,
+                        current.base_url,
+                        current.token,
+                        current.model_id,
+                    )
+                    replacement_connection = (
+                        replacement.provider_format,
+                        replacement.base_url,
+                        replacement.token,
+                        replacement.model_id,
+                    )
+                    if replacement_connection != current_connection:
+                        replacement = replace(
+                            replacement,
+                            revision=secrets.token_hex(16),
+                        )
                     connections[index] = replacement
                     self._write_connections(connections)
                     return replacement.summary()
@@ -246,11 +269,13 @@ class EnvProfileCatalog:
         draft: ProfileDraft,
         *,
         existing_token: str | None = None,
+        revision: str | None = None,
     ) -> ModelConnection:
         display_name = draft.display_name.strip()
         base_url = draft.base_url.strip()
         model_id = draft.model_id.strip()
         token = (draft.token or "").strip() or (existing_token or "")
+        resolved_revision = revision or secrets.token_hex(16)
 
         try:
             provider_format = ProfileFormat(draft.provider_format)
@@ -277,6 +302,8 @@ class EnvProfileCatalog:
             )
         if any(character in token for character in "\r\n\0"):
             raise ProfileValidationError("Токен не может содержать перенос строки.")
+        if not re.fullmatch(r"[0-9a-f]{32}", resolved_revision):
+            raise ProfileValidationError("Ревизия профиля имеет неверный формат.")
 
         try:
             parsed_url = urlsplit(base_url)
@@ -300,6 +327,7 @@ class EnvProfileCatalog:
             base_url=base_url.rstrip("/"),
             token=token,
             model_id=model_id,
+            revision=resolved_revision,
         )
 
     def _load_connections(self) -> list[ModelConnection]:
@@ -338,6 +366,7 @@ class EnvProfileCatalog:
                         base_url=values[prefix + "BASE_URL"],
                         token=values[prefix + "TOKEN"],
                         model_id=values[prefix + "MODEL_ID"],
+                        revision=values.get(prefix + "REVISION", profile_id),
                     )
                 except (KeyError, ValueError) as exc:
                     raise ProfileStorageError(
@@ -425,6 +454,7 @@ class EnvProfileCatalog:
                 "BASE_URL": connection.base_url,
                 "TOKEN": connection.token,
                 "MODEL_ID": connection.model_id,
+                "REVISION": connection.revision,
             }
             for suffix, value in fields.items():
                 lines.append(f"{prefix}{suffix}={_shell_quote(value)}")
