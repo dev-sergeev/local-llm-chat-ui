@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light dark">
+    <meta name="description" content="Локальный чат DataLab Risk с корпоративными LLM">
+    <title>DataLab Risk Chat</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="История диалогов">
+        <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">DR</div>
+          <div class="brand-copy">
+            <strong>DataLab Risk</strong>
+            <span>Local AI workspace</span>
+          </div>
+          <button class="icon-button mobile-only" id="sidebar-close" type="button" aria-label="Закрыть меню">×</button>
+        </div>
+
+        <button class="new-chat-button" id="new-chat-button" type="button">
+          <span aria-hidden="true">＋</span>
+          Новый чат
+          <kbd>⌘ K</kbd>
+        </button>
+
+        <label class="search-box" for="conversation-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="conversation-search" type="search" autocomplete="off" placeholder="Поиск диалогов">
+        </label>
+
+        <div class="sidebar-section-label">
+          <span>Диалоги</span>
+          <span id="conversation-count">0</span>
+        </div>
+        <nav class="conversation-list" id="conversation-list" aria-live="polite"></nav>
+
+        <div class="sidebar-footer">
+          <button class="sidebar-action" id="manage-models-sidebar" type="button">
+            <span aria-hidden="true">⌘</span>
+            Профили моделей
+            <span class="count-badge" id="profile-count">0</span>
+          </button>
+          <button class="sidebar-action" id="theme-toggle" type="button">
+            <span aria-hidden="true" id="theme-icon">◐</span>
+            <span id="theme-label">Тема</span>
+          </button>
+          <div class="local-status">
+            <span class="status-dot" aria-hidden="true"></span>
+            Только localhost
+          </div>
+        </div>
+      </aside>
+
+      <button class="sidebar-scrim" id="sidebar-scrim" type="button" aria-label="Закрыть меню"></button>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <button class="icon-button mobile-only" id="sidebar-open" type="button" aria-label="Открыть историю">☰</button>
+          <button class="chat-title" id="chat-title" type="button" title="Переименовать диалог">Новый чат</button>
+          <div class="topbar-actions">
+            <label class="model-picker" for="model-select">
+              <span>Модель</span>
+              <select id="model-select" aria-label="Активный профиль модели"></select>
+            </label>
+            <button class="button button-secondary compact" id="manage-models-top" type="button">Настроить</button>
+          </div>
+        </header>
+
+        <section class="welcome-state" id="welcome-state">
+          <div class="welcome-orbit" aria-hidden="true">
+            <div class="welcome-core">DR</div>
+          </div>
+          <p class="eyebrow">DATA LAB · RISK</p>
+          <h1>Закрытый контур.<br>Открытый диалог.</h1>
+          <p class="welcome-copy">Работайте с GigaChat и OpenAI-compatible моделями, сохраняя историю и секреты только на этом компьютере.</p>
+          <div class="welcome-actions">
+            <button class="button button-primary" id="welcome-new-chat" type="button">Начать диалог</button>
+            <button class="button button-secondary" id="welcome-add-model" type="button">Добавить модель</button>
+          </div>
+          <div class="feature-strip" aria-label="Возможности">
+            <div><strong>Локально</strong><span>SQLite и .env</span></div>
+            <div><strong>Надёжно</strong><span>Повторы и восстановление</span></div>
+            <div><strong>Гибко</strong><span>Ветки и версии ответов</span></div>
+          </div>
+        </section>
+
+        <section class="chat-view" id="chat-view" hidden>
+          <div class="messages" id="messages" role="log" aria-live="polite" aria-label="Сообщения диалога"></div>
+          <button class="jump-bottom" id="jump-bottom" type="button" hidden>↓ К последнему сообщению</button>
+
+          <div class="composer-wrap">
+            <form class="composer" id="composer-form">
+              <textarea id="message-input" rows="1" maxlength="200000" placeholder="Сообщение для модели…" aria-label="Сообщение"></textarea>
+              <div class="composer-footer">
+                <span class="composer-hint" id="composer-status">Enter — отправить · Shift+Enter — новая строка</span>
+                <div class="composer-buttons">
+                  <button class="button button-danger compact" id="stop-button" type="button" hidden>Остановить</button>
+                  <button class="send-button" id="send-button" type="submit" aria-label="Отправить сообщение">↑</button>
+                </div>
+              </div>
+            </form>
+            <p class="disclaimer">Ответ модели может содержать ошибки. Проверяйте значимые выводы.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="model-dialog" id="model-dialog" aria-labelledby="model-dialog-title">
+      <div class="dialog-shell">
+        <header class="dialog-header">
+          <div>
+            <p class="eyebrow">ПОДКЛЮЧЕНИЯ</p>
+            <h2 id="model-dialog-title">Профили моделей</h2>
+          </div>
+          <button class="icon-button" id="model-dialog-close" type="button" aria-label="Закрыть">×</button>
+        </header>
+        <div class="dialog-content">
+          <aside class="profile-pane">
+            <button class="button button-primary full-width" id="add-profile-button" type="button">＋ Добавить профиль</button>
+            <div class="profile-list" id="profile-list" aria-label="Сохранённые профили"></div>
+          </aside>
+          <section class="profile-editor">
+            <form id="profile-form">
+              <div class="form-heading">
+                <div>
+                  <h3 id="profile-form-title">Новый профиль</h3>
+                  <p>Настройки сохраняются в локальном <code>.env</code>.</p>
+                </div>
+                <span class="format-chip" id="format-chip">GigaChat</span>
+              </div>
+
+              <label class="field">
+                <span>Название в меню</span>
+                <input name="display_name" type="text" maxlength="80" required placeholder="Например, GigaChat PROD" autocomplete="off">
+              </label>
+              <label class="field">
+                <span>Формат API</span>
+                <select name="format" required>
+                  <option value="gigachat">GigaChat</option>
+                  <option value="openai">OpenAI-compatible</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>URL модели</span>
+                <input name="base_url" type="url" maxlength="2048" required placeholder="Адрес API в закрытом контуре" autocomplete="off" spellcheck="false">
+              </label>
+              <label class="field">
+                <span>Токен</span>
+                <div class="secret-input">
+                  <input name="token" id="profile-token" type="password" maxlength="8192" placeholder="Введите токен" autocomplete="new-password" spellcheck="false">
+                  <button id="token-visibility" type="button" aria-label="Показать или скрыть токен">Показать</button>
+                </div>
+                <small id="token-help">Токен хранится локально и никогда не отображается повторно.</small>
+              </label>
+              <label class="field">
+                <span>Model ID</span>
+                <input name="model_id" type="text" maxlength="200" required placeholder="Значение параметра model" autocomplete="off" spellcheck="false">
+              </label>
+
+              <div class="connection-result" id="connection-result" hidden aria-live="polite"></div>
+              <div class="form-actions">
+                <button class="button button-ghost danger-text" id="delete-profile-button" type="button" hidden>Удалить</button>
+                <span class="form-spacer"></span>
+                <button class="button button-secondary" id="test-profile-button" type="button" disabled>Проверить</button>
+                <button class="button button-primary" type="submit">Сохранить</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      </div>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,9 @@
+{
+  "name": "datalab-risk-chat-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/js/*.test.mjs"
+  }
+}
+
