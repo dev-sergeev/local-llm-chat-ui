@@ -75,3 +75,34 @@ export function shouldAutoFollowConversation({
   const becameTerminal = Boolean(wasPending && !isPending);
   return messagesGrew || becameTerminal;
 }
+
+export function readStorageValue(storageFactory, key) {
+  try {
+    const storage = storageFactory();
+    return storage ? storage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeStorageValue(storageFactory, key, value) {
+  try {
+    const storage = storageFactory();
+    if (!storage) return false;
+    storage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeStorageValue(storageFactory, key) {
+  try {
+    const storage = storageFactory();
+    if (!storage) return false;
+    storage.removeItem(key);
+    return true;
+  } catch {
+    return false;
+  }
+}

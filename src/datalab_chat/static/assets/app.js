@@ -2,10 +2,13 @@ import { escapeHtml, renderMarkdown } from "./markdown.js";
 import {
   deriveComposerState,
   mergeRejectedSubmissionDraft,
+  readStorageValue,
+  removeStorageValue,
   shouldAutoFollowConversation,
   shouldPollConversation,
   shouldRefreshAcceptedSubmission,
   shouldRestoreRejectedSubmission,
+  writeStorageValue,
 } from "./ui-state.js";
 
 const PENDING_STATUSES = new Set(["queued", "running", "retrying"]);
@@ -68,6 +71,10 @@ const state = {
   busy: false,
 };
 
+function browserStorage() {
+  return window.localStorage;
+}
+
 class ApiError extends Error {
   constructor(status, code, message) {
     super(message);
@@ -83,7 +90,7 @@ async function initialize() {
   applyInitialTheme();
   try {
     await Promise.all([loadProfiles(), loadConversations()]);
-    const remembered = localStorage.getItem("datalab.currentConversation");
+    const remembered = readStorageValue(browserStorage, "datalab.currentConversation");
     const preferred = state.conversations.find((item) => item.id === remembered)?.id;
     const initial = preferred || state.conversations[0]?.id;
     if (initial) {
@@ -143,7 +150,6 @@ async function api(path, options = {}) {
   const request = { method, headers: { Accept: "application/json" } };
   if (!new Set(["GET", "HEAD"]).has(method)) {
     request.headers["Content-Type"] = "application/json";
-    request.headers["X-DataLab-UI"] = "browser";
     request.body = JSON.stringify(options.body ?? {});
   }
   try {
@@ -185,7 +191,7 @@ async function openConversation(conversationId, options = {}) {
     showConversation(conversation, { scroll, closeSidebar: shouldClose });
   } catch (error) {
     if (error instanceof ApiError && error.status === 404) {
-      localStorage.removeItem("datalab.currentConversation");
+      removeStorageValue(browserStorage, "datalab.currentConversation");
       state.current = null;
       await loadConversations();
       renderWelcome();
@@ -213,7 +219,7 @@ function showConversation(conversation, options = {}) {
   const { scroll = false, closeSidebar: shouldClose = true } = options;
   state.refreshRecoveryConversationId = null;
   state.current = conversation;
-  localStorage.setItem("datalab.currentConversation", conversation.id);
+  writeStorageValue(browserStorage, "datalab.currentConversation", conversation.id);
   renderConversation({ scroll });
   renderConversationList();
   scheduleGenerationPoll();
@@ -698,7 +704,7 @@ async function deleteConversation(conversationId) {
   const wasCurrent = state.current?.id === conversationId;
   if (wasCurrent) {
     state.current = null;
-    localStorage.removeItem("datalab.currentConversation");
+    removeStorageValue(browserStorage, "datalab.currentConversation");
   }
   await loadConversations();
   if (wasCurrent && state.conversations[0]) {
@@ -903,7 +909,7 @@ function closeSidebar() {
 }
 
 function applyInitialTheme() {
-  const saved = localStorage.getItem("datalab.theme");
+  const saved = readStorageValue(browserStorage, "datalab.theme");
   const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches;
   applyTheme(saved || (systemDark ? "dark" : "light"));
 }
@@ -914,7 +920,7 @@ function toggleTheme() {
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem("datalab.theme", theme);
+  writeStorageValue(browserStorage, "datalab.theme", theme);
   elements.themeIcon.textContent = theme === "dark" ? "☾" : "☀";
   elements.themeLabel.textContent = theme === "dark" ? "Тёмная тема" : "Светлая тема";
 }

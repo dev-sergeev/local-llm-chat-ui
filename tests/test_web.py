@@ -13,7 +13,7 @@ from datalab_chat.application import ChatApplication
 from datalab_chat.generation import GenerationPolicy
 from datalab_chat.memory import SQLiteChatMemory
 from datalab_chat.profiles import EnvProfileCatalog, ProfileDraft, ProfileFormat
-from datalab_chat.web import create_server
+from datalab_chat.web import PATH_PREFIX_BOOTSTRAP_SHA256, create_server
 
 
 class WebGateway:
@@ -73,7 +73,6 @@ def running_server(tmp_path):
         app.shutdown()
         thread.join(1)
 
-
 def request(base_url, method, path, payload=None, headers=None):
     body = None if payload is None else json.dumps(payload).encode("utf-8")
     actual_headers = dict(headers or {})
@@ -102,7 +101,9 @@ def test_static_app_and_health_have_local_security_headers(running_server):
         html = response.read().decode("utf-8")
         assert response.status == 200
         assert "DataLab" in html
-        assert "default-src 'self'" in response.headers["Content-Security-Policy"]
+        content_security_policy = response.headers["Content-Security-Policy"]
+        assert "default-src 'self'" in content_security_policy
+        assert f"'{PATH_PREFIX_BOOTSTRAP_SHA256}'" in content_security_policy
         assert response.headers["X-Content-Type-Options"] == "nosniff"
 
     for asset, expected_type in (
@@ -360,16 +361,20 @@ def test_head_error_has_headers_but_no_body(running_server):
     assert body is None
 
 
-def test_mutations_reject_foreign_origin_and_non_json_body(running_server):
-    status, _, error = request(
+def test_mutations_accept_proxy_origins_but_still_require_json(running_server):
+    status, _, conversation = request(
         running_server,
         "POST",
         "/api/conversations",
         {},
-        headers={"Origin": "https://evil.example"},
+        headers={
+            "Host": "preview.example",
+            "Origin": "https://another.example",
+            "Sec-Fetch-Site": "cross-site",
+        },
     )
-    assert status == 403
-    assert error["error"]["code"] == "forbidden_origin"
+    assert status == 201
+    assert conversation["title"] == "Новый чат"
 
     req = Request(
         running_server + "/api/conversations",
@@ -382,17 +387,7 @@ def test_mutations_reject_foreign_origin_and_non_json_body(running_server):
     assert caught.value.code == 415
 
 
-def test_mutations_accept_opaque_origin_from_loopback_ui(running_server):
-    blocked_status, _, blocked_error = request(
-        running_server,
-        "POST",
-        "/api/profiles",
-        {},
-        headers={"Origin": "null"},
-    )
-    assert blocked_status == 403
-    assert blocked_error["error"]["code"] == "forbidden_origin"
-
+def test_mutations_accept_opaque_origin(running_server):
     status, _, profile = request(
         running_server,
         "POST",
@@ -404,7 +399,7 @@ def test_mutations_accept_opaque_origin_from_loopback_ui(running_server):
             "token": "local-secret",
             "model_id": "risk-model",
         },
-        headers={"Origin": "null", "X-DataLab-UI": "browser"},
+        headers={"Origin": "null"},
     )
 
     assert status == 201
@@ -412,87 +407,30 @@ def test_mutations_accept_opaque_origin_from_loopback_ui(running_server):
     assert "token" not in profile
 
 
-def test_mutations_accept_forwarded_origin_from_loopback_ui(running_server):
-    status, _, conversation = request(
-        running_server,
-        "POST",
-        "/api/conversations",
-        {},
-        headers={
-            "Origin": "http://127.0.0.1:49152",
-            "Sec-Fetch-Site": "same-origin",
-            "X-DataLab-UI": "browser",
-        },
-    )
-
-    assert status == 201
-    assert conversation["title"] == "Новый чат"
-
-
-def test_mutations_compare_origin_with_forwarded_loopback_host(running_server):
-    status, _, conversation = request(
-        running_server,
-        "POST",
-        "/api/conversations",
-        {},
-        headers={
-            "Host": "127.0.0.1:49152",
-            "Origin": "http://127.0.0.1:49152",
-            "Sec-Fetch-Site": "same-origin",
-        },
-    )
-
-    assert status == 201
-    assert conversation["title"] == "Новый чат"
-
-
-def test_cross_site_origin_stays_blocked_with_ui_marker(running_server):
-    for origin in (
-        "https://evil.example",
-        running_server.replace("127.0.0.1", "localhost"),
-    ):
-        status, _, error = request(
-            running_server,
-            "POST",
-            "/api/conversations",
-            {},
-            headers={
-                "Origin": origin,
-                "Sec-Fetch-Site": "cross-site",
-                "X-DataLab-UI": "browser",
-            },
-        )
-
-        assert status == 403
-        assert error["error"]["code"] == "forbidden_origin"
-
-
-def test_requests_reject_non_loopback_host(running_server):
-    status, _, error = request(
+def test_requests_accept_arbitrary_proxy_host_and_origin(running_server):
+    status, _, health = request(
         running_server,
         "GET",
         "/api/health",
-        headers={"Host": "rebinding.example"},
+        headers={"Host": "preview.example"},
     )
+    assert status == 200
+    assert health["status"] == "ok"
 
-    assert status == 403
-    assert error["error"]["code"] == "forbidden_host"
-
-    status, _, error = request(
+    status, _, conversation = request(
         running_server,
         "POST",
-        "/api/profiles",
+        "/api/conversations",
         {},
         headers={
-            "Host": "rebinding.example",
-            "Origin": "null",
-            "X-DataLab-UI": "browser",
+            "Host": "preview.example",
+            "Origin": "https://unrelated.example",
+            "Sec-Fetch-Site": "cross-site",
         },
     )
 
-    assert status == 403
-    assert error["error"]["code"] == "forbidden_host"
-
+    assert status == 201
+    assert conversation["title"] == "Новый чат"
 
 def test_unknown_and_traversal_paths_are_not_served(running_server):
     status, _, error = request(running_server, "GET", "/api/unknown")

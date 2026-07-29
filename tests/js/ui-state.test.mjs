@@ -4,10 +4,13 @@ import test from "node:test";
 import {
   deriveComposerState,
   mergeRejectedSubmissionDraft,
+  readStorageValue,
+  removeStorageValue,
   shouldAutoFollowConversation,
   shouldRefreshAcceptedSubmission,
   shouldPollConversation,
   shouldRestoreRejectedSubmission,
+  writeStorageValue,
 } from "../../src/datalab_chat/static/assets/ui-state.js";
 
 test("composer remains writable and sends to the queue during generation", () => {
@@ -196,4 +199,26 @@ test("conversation updates auto-follow only when the reader was near the bottom"
     false,
     "an unchanged poll must not cause repeated scrolling",
   );
+});
+
+test("browser preferences tolerate disabled or read-only local storage", () => {
+  const unavailableStorage = () => {
+    throw new Error("storage is disabled");
+  };
+  const readOnlyStorage = () => ({
+    getItem: () => "dark",
+    setItem: () => {
+      throw new Error("storage is read-only");
+    },
+    removeItem: () => {
+      throw new Error("storage is read-only");
+    },
+  });
+
+  assert.equal(readStorageValue(unavailableStorage, "theme"), null);
+  assert.equal(readStorageValue(readOnlyStorage, "theme"), "dark");
+  assert.equal(writeStorageValue(unavailableStorage, "theme", "dark"), false);
+  assert.equal(writeStorageValue(readOnlyStorage, "theme", "dark"), false);
+  assert.equal(removeStorageValue(unavailableStorage, "theme"), false);
+  assert.equal(removeStorageValue(readOnlyStorage, "theme"), false);
 });

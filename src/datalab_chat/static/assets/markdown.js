@@ -3,11 +3,11 @@ const TOKEN_END = "\uE001";
 
 export function escapeHtml(value) {
   return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 export function safeExternalUrl(value) {
@@ -24,7 +24,7 @@ export function safeExternalUrl(value) {
 export function renderMarkdown(source) {
   try {
     const blockTokens = [];
-    const normalized = String(source ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+    const normalized = String(source ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const withCodeBlocks = normalized.replace(
       /```([^\n`]*)\n([\s\S]*?)```/g,
       (_match, rawLanguage, rawCode) => {

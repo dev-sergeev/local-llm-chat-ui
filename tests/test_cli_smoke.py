@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from datalab_chat.__main__ import _configure_logging
 
@@ -66,6 +66,12 @@ def test_module_starts_real_localhost_service_and_stops_cleanly(tmp_path):
         with urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
             html = response.read().decode("utf-8")
             assert "Local LLM Chat" in html
+        proxy_request = Request(
+            f"http://127.0.0.1:{port}/api/health",
+            headers={"Host": "preview.example"},
+        )
+        with urlopen(proxy_request, timeout=1) as response:
+            assert response.status == 200
         assert stat.S_IMODE((data_dir / "chat.db").stat().st_mode) == 0o600
         assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     finally:

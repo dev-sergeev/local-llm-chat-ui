@@ -6,6 +6,7 @@
     <meta name="color-scheme" content="light dark">
     <meta name="description" content="Локальный чат с GigaChat и OpenAI-compatible LLM">
     <title>Local LLM Chat</title>
+    <script>if (location.pathname.slice(-1) !== "/") location.replace(location.pathname + "/" + location.search + location.hash);</script>
     <link rel="stylesheet" href="assets/app.css">
   </head>
   <body>
@@ -49,7 +50,7 @@
           </button>
           <div class="local-status">
             <span class="status-dot" aria-hidden="true"></span>
-            Только localhost
+            Loopback + ваш прокси
           </div>
         </div>
       </aside>
