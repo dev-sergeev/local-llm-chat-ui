@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datalab-risk-chat"
+version = "0.1.0"
+description = "Offline localhost chat UI for GigaChat and OpenAI-compatible LLM endpoints"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "langchain-gigachat==0.5.1",
+  "langchain-openai==1.1.10",
+]
+
+[project.scripts]
+datalab-risk-chat = "datalab_chat.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+

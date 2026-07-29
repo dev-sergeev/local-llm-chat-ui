@@ -1,0 +1,3 @@
+langchain-gigachat==0.5.1
+langchain-openai==1.1.10
+
