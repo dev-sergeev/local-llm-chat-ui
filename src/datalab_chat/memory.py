@@ -419,6 +419,12 @@ class SQLiteChatMemory:
             row = self._generation_row(connection, generation_id)
         return self._generation_view(row)
 
+    def conversation_for_message(self, message_id: str) -> ConversationSummary:
+        with self._read() as connection:
+            message = self._message_row(connection, message_id)
+            conversation = self._conversation_row(connection, message["conversation_id"])
+        return self._conversation_summary(conversation)
+
     def context_for_generation(self, generation_id: str) -> list[dict[str, str]]:
         with self._read() as connection:
             generation = self._generation_row(connection, generation_id)
