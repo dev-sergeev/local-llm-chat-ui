@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-import queue
 import random
 import threading
 import time
 from dataclasses import dataclass
 
-from datalab_chat.gateways import GatewayFactory, GatewayFailure, LLMGateway
+from datalab_chat.gateways import (
+    BoundedGatewayCaller,
+    ChunkCallback,
+    GatewayCallCancelled,
+    GatewayCallDeadline,
+    GatewayFactory,
+    GatewayFailure,
+    LLMGateway,
+)
 from datalab_chat.memory import (
     GenerationStatus,
     GenerationView,
@@ -62,14 +69,24 @@ class GenerationCoordinator:
         gateway_factory: GatewayFactory,
         *,
         policy: GenerationPolicy | None = None,
+        caller: BoundedGatewayCaller | None = None,
     ):
         self._memory = memory
         self._gateway_factory = gateway_factory
         self._policy = policy or GenerationPolicy()
+        self._caller = caller or BoundedGatewayCaller(
+            poll_interval_seconds=self._policy.poll_interval_seconds
+        )
         self._tasks: dict[str, _Task] = {}
         self._lock = threading.RLock()
 
-    def submit(self, generation_id: str, connection: ModelConnection) -> GenerationView:
+    def submit(
+        self,
+        generation_id: str,
+        connection: ModelConnection,
+        *,
+        on_chunk: ChunkCallback | None = None,
+    ) -> GenerationView:
         generation = self._memory.get_generation(generation_id)
         if generation.status is not GenerationStatus.QUEUED:
             raise MemoryConflict("Запустить можно только новую генерацию.")
@@ -79,7 +96,7 @@ class GenerationCoordinator:
             cancel_event = threading.Event()
             thread = threading.Thread(
                 target=self._run,
-                args=(generation_id, connection, cancel_event),
+                args=(generation_id, connection, cancel_event, on_chunk),
                 name=f"generation-{generation_id[:8]}",
                 daemon=True,
             )
@@ -129,6 +146,7 @@ class GenerationCoordinator:
         generation_id: str,
         connection: ModelConnection,
         cancel_event: threading.Event,
+        on_chunk: ChunkCallback | None,
     ) -> None:
         deadline = time.monotonic() + self._policy.total_timeout_seconds
         attempts = 0
@@ -153,6 +171,7 @@ class GenerationCoordinator:
                         timeout_seconds=remaining,
                         deadline=deadline,
                         cancel_event=cancel_event,
+                        on_chunk=on_chunk,
                     )
                     if self._cancelled(generation_id, cancel_event):
                         self._cancel_safely(generation_id)
@@ -206,6 +225,9 @@ class GenerationCoordinator:
                 message="Модель вернула непредвиденную ошибку.",
                 attempts=attempts,
             )
+        finally:
+            with self._lock:
+                self._tasks.pop(generation_id, None)
 
     def _invoke_interruptibly(
         self,
@@ -215,46 +237,30 @@ class GenerationCoordinator:
         timeout_seconds: float,
         deadline: float,
         cancel_event: threading.Event,
+        on_chunk: ChunkCallback | None,
     ) -> str:
-        results: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
-
-        def invoke() -> None:
-            try:
-                result = gateway.complete(messages, timeout_seconds=timeout_seconds)
-                results.put((True, result))
-            except Exception as exc:
-                results.put((False, exc))
-
-        threading.Thread(target=invoke, name="llm-invoke", daemon=True).start()
-        while True:
-            if cancel_event.is_set():
-                raise _Cancelled
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise _DeadlineExceeded
-            try:
-                succeeded, value = results.get(
-                    timeout=min(self._policy.poll_interval_seconds, remaining)
-                )
-            except queue.Empty:
-                continue
-            if time.monotonic() >= deadline:
-                raise _DeadlineExceeded
-            if succeeded:
-                if not isinstance(value, str) or not value.strip():
-                    raise GatewayFailure(
-                        "empty_response",
-                        "Модель вернула пустой ответ.",
-                        retryable=True,
-                    )
-                return value.strip()
-            if isinstance(value, GatewayFailure):
-                raise value
+        remaining = min(timeout_seconds, deadline - time.monotonic())
+        if remaining <= 0:
+            raise _DeadlineExceeded
+        try:
+            value = self._caller.call(
+                gateway,
+                messages,
+                timeout_seconds=remaining,
+                cancel_event=cancel_event,
+                on_chunk=on_chunk,
+            )
+        except GatewayCallCancelled:
+            raise _Cancelled from None
+        except GatewayCallDeadline:
+            raise _DeadlineExceeded from None
+        if not value.strip():
             raise GatewayFailure(
-                "unexpected_provider_error",
-                "Модель вернула непредвиденную ошибку.",
+                "empty_response",
+                "Модель вернула пустой ответ.",
                 retryable=False,
             )
+        return value.strip()
 
     def _wait_backoff(
         self,
@@ -271,7 +277,9 @@ class GenerationCoordinator:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        return not cancel_event.wait(min(delay, remaining)) and time.monotonic() < deadline
+        return (
+            not cancel_event.wait(min(delay, remaining)) and time.monotonic() < deadline
+        )
 
     def _cancelled(self, generation_id: str, cancel_event: threading.Event) -> bool:
         if cancel_event.is_set():

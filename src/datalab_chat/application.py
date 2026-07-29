@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 
 from datalab_chat.gateways import (
+    BoundedGatewayCaller,
+    GatewayCallDeadline,
     GatewayFactory,
     GatewayFailure,
     classify_gateway_exception,
@@ -54,10 +56,15 @@ class ChatApplication:
         self._profiles = profiles
         self._memory = memory
         self._gateway_factory = gateway_factory
+        resolved_policy = generation_policy or GenerationPolicy()
+        self._caller = BoundedGatewayCaller(
+            poll_interval_seconds=resolved_policy.poll_interval_seconds
+        )
         self._generations = GenerationCoordinator(
             memory,
             gateway_factory,
-            policy=generation_policy,
+            policy=resolved_policy,
+            caller=self._caller,
         )
         self._memory.recover_interrupted_generations()
 
@@ -88,25 +95,61 @@ class ChatApplication:
         *,
         timeout_seconds: float = 30.0,
     ) -> ConnectionTestResult:
+        return self._test_connection(
+            self._profiles.resolve(profile_id),
+            timeout_seconds=timeout_seconds,
+        )
+
+    def test_profile_draft(
+        self,
+        draft: ProfileDraft,
+        *,
+        profile_id: str | None = None,
+        timeout_seconds: float = 30.0,
+    ) -> ConnectionTestResult:
+        connection = self._profiles.resolve_draft(draft, profile_id=profile_id)
+        return self._test_connection(connection, timeout_seconds=timeout_seconds)
+
+    def _test_connection(
+        self,
+        connection: ModelConnection,
+        *,
+        timeout_seconds: float,
+    ) -> ConnectionTestResult:
         if timeout_seconds <= 0 or timeout_seconds > 60:
-            raise ProfileValidationError("Тайм-аут проверки должен быть от 1 до 60 секунд.")
-        connection = self._profiles.resolve(profile_id)
+            raise ProfileValidationError(
+                "Тайм-аут проверки должен быть от 1 до 60 секунд."
+            )
         started = time.monotonic()
         try:
             gateway = self._gateway_factory.create(connection)
-            answer = gateway.complete(
+            answer = self._caller.call(
+                gateway,
                 [{"role": "user", "content": "Ответь одним словом: OK"}],
                 timeout_seconds=timeout_seconds,
             )
+        except GatewayCallDeadline:
+            raise GatewayFailure(
+                "request_timeout",
+                "Проверка подключения не завершилась вовремя.",
+                retryable=True,
+            ) from None
         except GatewayFailure:
             raise
         except Exception as exc:
             raise classify_gateway_exception(exc) from None
+        clean_answer = answer.strip()
+        if not clean_answer:
+            raise GatewayFailure(
+                "empty_response",
+                "Модель вернула пустой ответ.",
+                retryable=False,
+            )
         latency_ms = max(0, round((time.monotonic() - started) * 1000))
         return ConnectionTestResult(
             ok=True,
             latency_ms=latency_ms,
-            preview=answer.strip()[:200],
+            preview=clean_answer[:200],
         )
 
     def list_conversations(self, query: str | None = None) -> list[ConversationSummary]:
@@ -124,17 +167,38 @@ class ChatApplication:
     def get_conversation(self, conversation_id: str) -> ConversationView:
         return self._memory.get_conversation(conversation_id)
 
-    def rename_conversation(self, conversation_id: str, title: str) -> ConversationSummary:
-        return self._memory.rename_conversation(conversation_id, title)
+    def rename_conversation(
+        self, conversation_id: str, title: str
+    ) -> ConversationSummary:
+        return self.update_conversation(conversation_id, title=title)
 
     def select_profile(
         self,
         conversation_id: str,
         profile_id: str | None,
     ) -> ConversationSummary:
-        if profile_id is not None:
+        return self.update_conversation(
+            conversation_id,
+            profile_id=profile_id,
+            set_profile=True,
+        )
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        profile_id: str | None = None,
+        set_profile: bool = False,
+    ) -> ConversationSummary:
+        if set_profile and profile_id is not None:
             self._profiles.get(profile_id)
-        return self._memory.set_active_profile(conversation_id, profile_id)
+        return self._memory.update_conversation(
+            conversation_id,
+            title=title,
+            profile_id=profile_id,
+            set_profile=set_profile,
+        )
 
     def delete_conversation(self, conversation_id: str) -> None:
         self._memory.delete_conversation(conversation_id)

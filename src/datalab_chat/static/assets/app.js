@@ -327,7 +327,7 @@ function renderConversationList() {
 function renderProfileOptions() {
   elements.profileCount.textContent = String(state.profiles.length);
   if (!state.profiles.length) {
-    elements.modelSelect.innerHTML = '<option value="">Добавьте модель</option>';
+    elements.modelSelect.innerHTML = '<option value="">Добавьте профиль</option>';
     elements.modelSelect.disabled = true;
     return;
   }
@@ -608,7 +608,7 @@ function resetProfileForm() {
   elements.tokenVisibility.textContent = "Показать";
   elements.profileFormTitle.textContent = "Новый профиль";
   elements.tokenHelp.textContent = "Токен хранится локально и никогда не отображается повторно.";
-  elements.testProfile.disabled = true;
+  elements.testProfile.disabled = false;
   elements.deleteProfile.hidden = true;
   elements.connectionResult.hidden = true;
   updateFormatChip();
@@ -661,13 +661,17 @@ async function saveProfile() {
 }
 
 async function testCurrentProfile() {
-  if (!state.editingProfileId) return;
+  if (!elements.profileForm.reportValidity()) return;
+  const values = Object.fromEntries(new FormData(elements.profileForm));
+  if (!state.editingProfileId && !String(values.token || "").trim()) {
+    throw new ApiError(400, "validation_error", "Введите токен профиля.");
+  }
   setConnectionResult("Проверяем подключение…", false);
   elements.testProfile.disabled = true;
   try {
-    const result = await api(`/api/profiles/${state.editingProfileId}/test`, {
+    const result = await api("/api/profiles/test", {
       method: "POST",
-      body: { timeout_seconds: 30 },
+      body: { ...values, profile_id: state.editingProfileId, timeout_seconds: 30 },
     });
     setConnectionResult(`Подключение работает · ${result.latency_ms} мс · ${result.preview}`, false);
   } catch (error) {

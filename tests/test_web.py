@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from urllib.error import HTTPError
@@ -19,8 +20,11 @@ class WebGateway:
     def __init__(self, answers):
         self.answers = list(answers)
 
-    def complete(self, messages, *, timeout_seconds):
-        return self.answers.pop(0)
+    def complete(self, messages, *, timeout_seconds, on_chunk=None):
+        answer = self.answers.pop(0)
+        if on_chunk is not None:
+            on_chunk(answer)
+        return answer
 
 
 class WebFactory:
@@ -35,7 +39,9 @@ class WebFactory:
 def running_server(tmp_path):
     static = tmp_path / "static"
     static.mkdir()
-    (static / "index.html").write_text("<!doctype html><title>DataLab</title>", encoding="utf-8")
+    (static / "index.html").write_text(
+        "<!doctype html><title>DataLab</title>", encoding="utf-8"
+    )
     (static / "app.js").write_text("console.log('ok')", encoding="utf-8")
     app = ChatApplication(
         EnvProfileCatalog(tmp_path / ".env"),
@@ -168,6 +174,65 @@ def test_complete_chat_flow_over_http_never_returns_token(running_server):
     assert checked["ok"] is True
 
 
+def test_unsaved_profile_values_can_be_checked_without_persistence(running_server):
+    status, _, checked = request(
+        running_server,
+        "POST",
+        "/api/profiles/test",
+        {
+            "display_name": "Черновик",
+            "format": "openai",
+            "base_url": "https://draft.gateway.local/v1",
+            "token": "draft-secret",
+            "model_id": "draft-model",
+            "timeout_seconds": 0.5,
+        },
+    )
+
+    assert status == 200
+    assert checked["ok"] is True
+    assert "draft-secret" not in json.dumps(checked)
+    _, _, profiles = request(running_server, "GET", "/api/profiles")
+    assert profiles == []
+
+
+def test_conversation_patch_rolls_back_all_fields_on_invalid_profile(running_server):
+    _, _, profile = request(
+        running_server,
+        "POST",
+        "/api/profiles",
+        {
+            "display_name": "Giga PROD",
+            "format": "gigachat",
+            "base_url": "https://gateway.bank.local/v1",
+            "token": "top-secret-token",
+            "model_id": "risk-model",
+        },
+    )
+    _, _, conversation = request(
+        running_server,
+        "POST",
+        "/api/conversations",
+        {"profile_id": profile["id"]},
+    )
+
+    status, _, _ = request(
+        running_server,
+        "PATCH",
+        f"/api/conversations/{conversation['id']}",
+        {"title": "Не должно сохраниться", "profile_id": "0" * 32},
+    )
+
+    assert status == 404
+    _, _, unchanged = request(
+        running_server,
+        "GET",
+        f"/api/conversations/{conversation['id']}",
+    )
+    assert unchanged["title"] == "Новый чат"
+    assert unchanged["active_profile_id"] == profile["id"]
+
+
 def test_validation_errors_are_json_and_do_not_stop_server(running_server):
     status, _, error = request(
         running_server,
@@ -180,6 +245,27 @@ def test_validation_errors_are_json_and_do_not_stop_server(running_server):
 
     status, _, _ = request(running_server, "GET", "/api/health")
     assert status == 200
+
+
+def test_query_values_are_not_written_to_request_log(running_server, caplog):
+    caplog.set_level(logging.INFO, logger="datalab_chat.web")
+
+    status, _, _ = request(
+        running_server,
+        "GET",
+        "/api/conversations?query=confidential-search-value",
+    )
+
+    assert status == 200
+    assert "confidential-search-value" not in caplog.text
+
+
+def test_head_error_has_headers_but_no_body(running_server):
+    status, headers, body = request(running_server, "HEAD", "/api/not-found")
+
+    assert status == 404
+    assert int(headers["Content-Length"]) > 0
+    assert body is None
 
 
 def test_mutations_reject_foreign_origin_and_non_json_body(running_server):

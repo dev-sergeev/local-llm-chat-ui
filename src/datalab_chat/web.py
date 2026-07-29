@@ -88,13 +88,17 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        self._json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "Метод запрещён.")
+        self._json_error(
+            HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "Метод запрещён."
+        )
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        del size
+        LOGGER.info("HTTP %s %s %s", self.command, urlsplit(self.path).path, code)
 
     def log_message(self, message_format: str, *args: object) -> None:
-        try:
-            LOGGER.info("HTTP %s", message_format % args)
-        except Exception:
-            LOGGER.info("HTTP request completed")
+        del message_format, args
+        LOGGER.info("HTTP server event")
 
     def _handle(self, method: str) -> None:
         try:
@@ -103,7 +107,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             if path.startswith("/api/") or path == "/api":
                 if method not in {"GET", "HEAD"}:
                     self._validate_mutation_request()
-                status, payload = self._dispatch_api(method, path, parse_qs(parsed.query))
+                status, payload = self._dispatch_api(
+                    method, path, parse_qs(parsed.query)
+                )
                 if status is HTTPStatus.NO_CONTENT:
                     self._empty(status)
                 else:
@@ -160,10 +166,31 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/profiles":
             if method in {"GET", "HEAD"}:
-                return HTTPStatus.OK, [profile.to_public_dict() for profile in app.list_profiles()]
+                return HTTPStatus.OK, [
+                    profile.to_public_dict() for profile in app.list_profiles()
+                ]
             if method == "POST":
-                profile = app.create_profile(self._profile_draft(self._json_body(), creating=True))
+                profile = app.create_profile(
+                    self._profile_draft(self._json_body(), creating=True)
+                )
                 return HTTPStatus.CREATED, profile.to_public_dict()
+
+        if path == "/api/profiles/test" and method == "POST":
+            body = self._json_body()
+            profile_id = _optional_string(body, "profile_id")
+            timeout = body.get("timeout_seconds", 30)
+            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+                raise RequestError(
+                    HTTPStatus.BAD_REQUEST,
+                    "validation_error",
+                    "Неверный тайм-аут.",
+                )
+            result = app.test_profile_draft(
+                self._profile_draft(body, creating=profile_id is None),
+                profile_id=profile_id,
+                timeout_seconds=float(timeout),
+            )
+            return HTTPStatus.OK, result.to_public_dict()
 
         profile_match = re.fullmatch(r"/api/profiles/([0-9a-f]{32})", path)
         if profile_match:
@@ -183,8 +210,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             body = self._json_body()
             timeout = body.get("timeout_seconds", 30)
             if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
-                raise RequestError(HTTPStatus.BAD_REQUEST, "validation_error", "Неверный тайм-аут.")
-            result = app.test_profile(test_match.group(1), timeout_seconds=float(timeout))
+                raise RequestError(
+                    HTTPStatus.BAD_REQUEST, "validation_error", "Неверный тайм-аут."
+                )
+            result = app.test_profile(
+                test_match.group(1), timeout_seconds=float(timeout)
+            )
             return HTTPStatus.OK, result.to_public_dict()
 
         if path == "/api/conversations":
@@ -203,7 +234,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         if conversation_match:
             conversation_id = conversation_match.group(1)
             if method in {"GET", "HEAD"}:
-                return HTTPStatus.OK, app.get_conversation(conversation_id).to_public_dict()
+                return HTTPStatus.OK, app.get_conversation(
+                    conversation_id
+                ).to_public_dict()
             if method == "PATCH":
                 body = self._json_body()
                 if "title" not in body and "profile_id" not in body:
@@ -212,17 +245,14 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                         "validation_error",
                         "Нет изменений для диалога.",
                     )
-                result = None
-                if "title" in body:
-                    result = app.rename_conversation(
-                        conversation_id,
-                        _required_string(body, "title"),
-                    )
-                if "profile_id" in body:
-                    result = app.select_profile(
-                        conversation_id,
-                        _optional_string(body, "profile_id"),
-                    )
+                result = app.update_conversation(
+                    conversation_id,
+                    title=(
+                        _required_string(body, "title") if "title" in body else None
+                    ),
+                    profile_id=_optional_string(body, "profile_id"),
+                    set_profile="profile_id" in body,
+                )
                 return HTTPStatus.OK, result.to_public_dict()
             if method == "DELETE":
                 app.delete_conversation(conversation_id)
@@ -257,7 +287,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             )
             return HTTPStatus.ACCEPTED, generation.to_public_dict()
 
-        regenerate_match = re.fullmatch(r"/api/messages/([0-9a-f]{32})/regenerate", path)
+        regenerate_match = re.fullmatch(
+            r"/api/messages/([0-9a-f]{32})/regenerate", path
+        )
         if regenerate_match and method == "POST":
             body = self._json_body()
             generation = app.regenerate(
@@ -293,7 +325,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             provider_format = ProfileFormat(_required_string(body, "format"))
         except ValueError as exc:
             raise ProfileValidationError("Неизвестный формат API.") from exc
-        token = _required_string(body, "token") if creating else _optional_string(body, "token")
+        token = (
+            _required_string(body, "token")
+            if creating
+            else _optional_string(body, "token")
+        )
         return ProfileDraft(
             display_name=_required_string(body, "display_name"),
             provider_format=provider_format,
@@ -331,7 +367,9 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         try:
             length = int(raw_length or "0")
         except ValueError as exc:
-            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid_json", "Неверная длина запроса.") from exc
+            raise RequestError(
+                HTTPStatus.BAD_REQUEST, "invalid_json", "Неверная длина запроса."
+            ) from exc
         if length < 0 or length > MAX_JSON_BODY:
             raise RequestError(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -342,9 +380,13 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             raw = self.rfile.read(length)
             decoded = json.loads(raw.decode("utf-8") if raw else "{}")
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid_json", "Тело запроса не является JSON.") from exc
+            raise RequestError(
+                HTTPStatus.BAD_REQUEST, "invalid_json", "Тело запроса не является JSON."
+            ) from exc
         if not isinstance(decoded, dict):
-            raise RequestError(HTTPStatus.BAD_REQUEST, "invalid_json", "Ожидается JSON-объект.")
+            raise RequestError(
+                HTTPStatus.BAD_REQUEST, "invalid_json", "Ожидается JSON-объект."
+            )
         return decoded
 
     def _serve_static(self, path: str, *, head_only: bool) -> None:
@@ -359,7 +401,10 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             self._json_error(HTTPStatus.NOT_FOUND, "not_found", "Файл не найден.")
             return
         candidate = (self.server.static_dir / relative).resolve()
-        if self.server.static_dir not in candidate.parents and candidate != self.server.static_dir:
+        if (
+            self.server.static_dir not in candidate.parents
+            and candidate != self.server.static_dir
+        ):
             self._json_error(HTTPStatus.NOT_FOUND, "not_found", "Файл не найден.")
             return
         try:
@@ -367,17 +412,29 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             self._json_error(HTTPStatus.NOT_FOUND, "not_found", "Файл не найден.")
             return
-        content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        content_type = (
+            mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+        )
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", f"{content_type}; charset=utf-8" if content_type.startswith("text/") or content_type == "application/javascript" else content_type)
+        self.send_header(
+            "Content-Type",
+            f"{content_type}; charset=utf-8"
+            if content_type.startswith("text/")
+            or content_type == "application/javascript"
+            else content_type,
+        )
         self.send_header("Content-Length", str(len(data)))
         self._common_headers(static=True)
         self.end_headers()
         if not head_only:
             self.wfile.write(data)
 
-    def _json(self, status: HTTPStatus, payload: object, *, head_only: bool = False) -> None:
-        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    def _json(
+        self, status: HTTPStatus, payload: object, *, head_only: bool = False
+    ) -> None:
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+            "utf-8"
+        )
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -388,7 +445,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _json_error(self, status: HTTPStatus, code: str, message: str) -> None:
         try:
-            self._json(status, {"error": {"code": code, "message": message}})
+            self._json(
+                status,
+                {"error": {"code": code, "message": message}},
+                head_only=self.command == "HEAD",
+            )
         except (BrokenPipeError, ConnectionResetError):
             pass
 
@@ -424,7 +485,9 @@ class RequestError(Exception):
 def _required_string(body: dict[str, Any], key: str) -> str:
     value = body.get(key)
     if not isinstance(value, str):
-        raise RequestError(HTTPStatus.BAD_REQUEST, "validation_error", f"Поле {key} обязательно.")
+        raise RequestError(
+            HTTPStatus.BAD_REQUEST, "validation_error", f"Поле {key} обязательно."
+        )
     return value
 
 
@@ -433,5 +496,9 @@ def _optional_string(body: dict[str, Any], key: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise RequestError(HTTPStatus.BAD_REQUEST, "validation_error", f"Поле {key} имеет неверный тип.")
+        raise RequestError(
+            HTTPStatus.BAD_REQUEST,
+            "validation_error",
+            f"Поле {key} имеет неверный тип.",
+        )
     return value

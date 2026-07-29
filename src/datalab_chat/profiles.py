@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -63,6 +64,44 @@ class ModelProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelSnapshot:
+    display_name: str
+    provider_format: ProfileFormat
+    model_id: str
+
+    def to_public_dict(self) -> dict[str, str]:
+        return {
+            "display_name": self.display_name,
+            "format": self.provider_format.value,
+            "model_id": self.model_id,
+        }
+
+    @classmethod
+    def from_dict(cls, value: object) -> ModelSnapshot:
+        if not isinstance(value, dict) or set(value) != {
+            "display_name",
+            "format",
+            "model_id",
+        }:
+            raise ValueError("Invalid model snapshot")
+        display_name = value["display_name"]
+        model_id = value["model_id"]
+        if not isinstance(display_name, str) or not isinstance(model_id, str):
+            raise ValueError("Invalid model snapshot")
+        if not display_name or not model_id:
+            raise ValueError("Invalid model snapshot")
+        try:
+            provider_format = ProfileFormat(value["format"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Invalid model snapshot") from exc
+        return cls(
+            display_name=display_name,
+            provider_format=provider_format,
+            model_id=model_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModelConnection:
     id: str
     display_name: str
@@ -81,12 +120,12 @@ class ModelConnection:
             has_token=bool(self.token),
         )
 
-    def snapshot(self) -> dict[str, str]:
-        return {
-            "display_name": self.display_name,
-            "format": self.provider_format.value,
-            "model_id": self.model_id,
-        }
+    def snapshot(self) -> ModelSnapshot:
+        return ModelSnapshot(
+            display_name=self.display_name,
+            provider_format=self.provider_format,
+            model_id=self.model_id,
+        )
 
 
 class EnvProfileCatalog:
@@ -125,6 +164,31 @@ class EnvProfileCatalog:
             raise ProfileStorageError("Не удалось прочитать профиль модели.") from exc
         raise ProfileNotFound("Профиль модели не найден.")
 
+    def resolve_draft(
+        self,
+        draft: ProfileDraft,
+        *,
+        profile_id: str | None = None,
+    ) -> ModelConnection:
+        """Validate unsaved form values without writing their secret to disk."""
+        with self._lock:
+            try:
+                existing_token = None
+                candidate_id = profile_id or secrets.token_hex(16)
+                if profile_id is not None:
+                    existing_token = self.resolve(profile_id).token
+                return self._validated_connection(
+                    candidate_id,
+                    draft,
+                    existing_token=existing_token,
+                )
+            except ProfileError:
+                raise
+            except Exception as exc:
+                raise ProfileStorageError(
+                    "Не удалось проверить профиль модели."
+                ) from exc
+
     def create(self, draft: ProfileDraft) -> ModelProfile:
         with self._lock:
             try:
@@ -136,7 +200,9 @@ class EnvProfileCatalog:
             except ProfileError:
                 raise
             except Exception as exc:
-                raise ProfileStorageError("Не удалось сохранить профиль модели.") from exc
+                raise ProfileStorageError(
+                    "Не удалось сохранить профиль модели."
+                ) from exc
 
     def update(self, profile_id: str, draft: ProfileDraft) -> ModelProfile:
         with self._lock:
@@ -156,7 +222,9 @@ class EnvProfileCatalog:
             except ProfileError:
                 raise
             except Exception as exc:
-                raise ProfileStorageError("Не удалось обновить профиль модели.") from exc
+                raise ProfileStorageError(
+                    "Не удалось обновить профиль модели."
+                ) from exc
         raise ProfileNotFound("Профиль модели не найден.")
 
     def delete(self, profile_id: str) -> None:
@@ -190,15 +258,23 @@ class EnvProfileCatalog:
             raise ProfileValidationError("Неизвестный формат API.") from exc
 
         if not display_name or len(display_name) > 80:
-            raise ProfileValidationError("Название профиля должно содержать от 1 до 80 символов.")
+            raise ProfileValidationError(
+                "Название профиля должно содержать от 1 до 80 символов."
+            )
         if any(character in display_name for character in "\r\n\0"):
-            raise ProfileValidationError("Название профиля содержит недопустимые символы.")
+            raise ProfileValidationError(
+                "Название профиля содержит недопустимые символы."
+            )
         if not model_id or len(model_id) > 200:
-            raise ProfileValidationError("Model ID должен содержать от 1 до 200 символов.")
+            raise ProfileValidationError(
+                "Model ID должен содержать от 1 до 200 символов."
+            )
         if any(character in model_id for character in "\r\n\0"):
             raise ProfileValidationError("Model ID содержит недопустимые символы.")
         if not token or len(token) > 8192:
-            raise ProfileValidationError("Токен обязателен и не должен превышать 8192 символа.")
+            raise ProfileValidationError(
+                "Токен обязателен и не должен превышать 8192 символа."
+            )
         if any(character in token for character in "\r\n\0"):
             raise ProfileValidationError("Токен не может содержать перенос строки.")
 
@@ -207,7 +283,9 @@ class EnvProfileCatalog:
         except ValueError as exc:
             raise ProfileValidationError("URL профиля имеет неверный формат.") from exc
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-            raise ProfileValidationError("URL профиля должен начинаться с http:// или https://.")
+            raise ProfileValidationError(
+                "URL профиля должен начинаться с http:// или https://."
+            )
         if len(base_url) > 2048 or any(character in base_url for character in "\r\n\0"):
             raise ProfileValidationError("URL профиля содержит недопустимые символы.")
 
@@ -233,18 +311,15 @@ class EnvProfileCatalog:
                 if not stripped or stripped.startswith("#") or "=" not in stripped:
                     continue
                 key, raw_value = stripped.split("=", 1)
-                try:
-                    decoded = json.loads(raw_value)
-                except json.JSONDecodeError as exc:
-                    raise ProfileStorageError("Блок профилей в .env повреждён.") from exc
-                if not isinstance(decoded, str):
-                    raise ProfileStorageError("Блок профилей в .env имеет неверный формат.")
+                decoded = _decode_env_value(raw_value)
                 values[key] = decoded
 
             ids_value = values.get(self._IDS_KEY, "")
             profile_ids = [value for value in ids_value.split(",") if value]
             if len(profile_ids) != len(set(profile_ids)):
-                raise ProfileStorageError("В .env обнаружены повторяющиеся ID профилей.")
+                raise ProfileStorageError(
+                    "В .env обнаружены повторяющиеся ID профилей."
+                )
 
             connections: list[ModelConnection] = []
             for profile_id in profile_ids:
@@ -261,7 +336,9 @@ class EnvProfileCatalog:
                         model_id=values[prefix + "MODEL_ID"],
                     )
                 except (KeyError, ValueError) as exc:
-                    raise ProfileStorageError("Профиль в .env заполнен не полностью.") from exc
+                    raise ProfileStorageError(
+                        "Профиль в .env заполнен не полностью."
+                    ) from exc
                 connections.append(connection)
             return connections
 
@@ -275,7 +352,9 @@ class EnvProfileCatalog:
 
     def _managed_lines(self, text: str) -> list[str] | None:
         lines = text.splitlines()
-        begin_positions = [index for index, line in enumerate(lines) if line == self._BEGIN]
+        begin_positions = [
+            index for index, line in enumerate(lines) if line == self._BEGIN
+        ]
         end_positions = [index for index, line in enumerate(lines) if line == self._END]
         if not begin_positions and not end_positions:
             return None
@@ -301,7 +380,9 @@ class EnvProfileCatalog:
                 text=True,
             )
             temporary_path = Path(temporary_name)
-            with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            with os.fdopen(
+                file_descriptor, "w", encoding="utf-8", newline="\n"
+            ) as handle:
                 handle.write(updated)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -309,7 +390,9 @@ class EnvProfileCatalog:
             os.replace(temporary_path, self.path)
             os.chmod(self.path, 0o600)
         except OSError as exc:
-            raise ProfileStorageError("Не удалось атомарно обновить локальный .env.") from exc
+            raise ProfileStorageError(
+                "Не удалось атомарно обновить локальный .env."
+            ) from exc
         finally:
             if temporary_path is not None and temporary_path.exists():
                 try:
@@ -320,7 +403,7 @@ class EnvProfileCatalog:
     def _render_managed_block(self, connections: list[ModelConnection]) -> str:
         lines = [
             self._BEGIN,
-            f"{self._IDS_KEY}={json.dumps(','.join(item.id for item in connections))}",
+            f"{self._IDS_KEY}={_shell_quote(','.join(item.id for item in connections))}",
         ]
         for connection in connections:
             prefix = f"DATALAB_PROFILE_{connection.id}_"
@@ -332,7 +415,7 @@ class EnvProfileCatalog:
                 "MODEL_ID": connection.model_id,
             }
             for suffix, value in fields.items():
-                lines.append(f"{prefix}{suffix}={json.dumps(value, ensure_ascii=False)}")
+                lines.append(f"{prefix}{suffix}={_shell_quote(value)}")
         lines.append(self._END)
         return "\n".join(lines)
 
@@ -350,3 +433,24 @@ class EnvProfileCatalog:
             raise ProfileStorageError("Границы блока профилей в .env повреждены.")
         replacement = lines[:begin] + managed.splitlines() + lines[end + 1 :]
         return "\n".join(replacement).rstrip("\n") + "\n"
+
+
+def _shell_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _decode_env_value(raw_value: str) -> str:
+    """Read current shell-safe values and the JSON encoding used by v0.1.0."""
+    try:
+        decoded = json.loads(raw_value)
+    except json.JSONDecodeError:
+        try:
+            parts = shlex.split(raw_value, comments=False, posix=True)
+        except ValueError as exc:
+            raise ProfileStorageError("Блок профилей в .env повреждён.") from exc
+        if len(parts) != 1:
+            raise ProfileStorageError("Блок профилей в .env имеет неверный формат.")
+        decoded = parts[0]
+    if not isinstance(decoded, str):
+        raise ProfileStorageError("Блок профилей в .env имеет неверный формат.")
+    return decoded

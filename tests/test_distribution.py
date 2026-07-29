@@ -6,7 +6,11 @@ from pathlib import Path
 
 
 def test_linux_scripts_are_executable_and_syntactically_valid():
-    scripts = [Path("start.sh"), Path("scripts/build-wheelhouse.sh"), Path("scripts/test.sh")]
+    scripts = [
+        Path("start.sh"),
+        Path("scripts/build-wheelhouse.sh"),
+        Path("scripts/test.sh"),
+    ]
     for script in scripts:
         assert script.is_file()
         assert os.access(script, os.X_OK)
@@ -30,6 +34,6 @@ def test_start_command_works_without_package_index():
 
 def test_example_environment_contains_no_credentials():
     example = Path(".env.example").read_text(encoding="utf-8")
-    assert "DATALAB_PROFILE_IDS=\"\"" in example
+    assert 'DATALAB_PROFILE_IDS=""' in example
     assert "secret" not in example.lower()
     assert "token=" not in example.lower()

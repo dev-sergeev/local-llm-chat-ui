@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+import queue
+import threading
+import time
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from datalab_chat.profiles import ModelConnection, ProfileFormat
@@ -16,17 +19,144 @@ class GatewayFailure(Exception):
         self.retryable = retryable
 
 
+ChunkCallback = Callable[[str], None]
+
+
 class LLMGateway(Protocol):
     def complete(
         self,
         messages: Sequence[dict[str, str]],
         *,
         timeout_seconds: float,
+        on_chunk: ChunkCallback | None = None,
     ) -> str: ...
 
 
 class GatewayFactory(Protocol):
     def create(self, connection: ModelConnection) -> LLMGateway: ...
+
+
+class GatewayCallCancelled(Exception):
+    """The local caller stopped waiting and will discard any provider result."""
+
+
+class GatewayCallDeadline(Exception):
+    """The application-enforced deadline elapsed."""
+
+
+class BoundedGatewayCaller:
+    """Contains ignored transport timeouts to a fixed number of daemon threads."""
+
+    def __init__(
+        self, *, max_concurrent_calls: int = 4, poll_interval_seconds: float = 0.1
+    ):
+        if max_concurrent_calls < 1:
+            raise ValueError("At least one provider call slot is required")
+        if poll_interval_seconds <= 0:
+            raise ValueError("Provider call poll interval must be positive")
+        self._slots = threading.BoundedSemaphore(max_concurrent_calls)
+        self._poll_interval_seconds = poll_interval_seconds
+
+    def call(
+        self,
+        gateway: LLMGateway,
+        messages: Sequence[dict[str, str]],
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None = None,
+        on_chunk: ChunkCallback | None = None,
+    ) -> str:
+        if timeout_seconds <= 0:
+            raise GatewayCallDeadline
+        deadline = time.monotonic() + timeout_seconds
+        self._acquire_slot(deadline, cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            self._slots.release()
+            raise GatewayCallCancelled
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        accepting_events = threading.Event()
+        accepting_events.set()
+
+        def emit(chunk: str) -> None:
+            if accepting_events.is_set():
+                events.put(("chunk", chunk))
+
+        def invoke() -> None:
+            try:
+                result = gateway.complete(
+                    messages,
+                    timeout_seconds=max(0.001, deadline - time.monotonic()),
+                    on_chunk=emit,
+                )
+                if accepting_events.is_set():
+                    events.put(("result", result))
+            except Exception as exc:
+                if accepting_events.is_set():
+                    events.put(("error", exc))
+            finally:
+                self._slots.release()
+
+        threading.Thread(
+            target=invoke,
+            name="bounded-llm-invoke",
+            daemon=True,
+        ).start()
+
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise GatewayCallCancelled
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise GatewayCallDeadline
+                try:
+                    kind, value = events.get(
+                        timeout=min(self._poll_interval_seconds, remaining)
+                    )
+                except queue.Empty:
+                    continue
+                if kind == "chunk":
+                    if not isinstance(value, str):
+                        raise GatewayFailure(
+                            "invalid_response",
+                            "Модель вернула повреждённый ответ.",
+                            retryable=False,
+                        )
+                    if on_chunk is not None:
+                        on_chunk(value)
+                    continue
+                if kind == "result":
+                    if not isinstance(value, str):
+                        raise GatewayFailure(
+                            "invalid_response",
+                            "Модель вернула повреждённый ответ.",
+                            retryable=False,
+                        )
+                    return value
+                if isinstance(value, Exception):
+                    raise value
+                raise GatewayFailure(
+                    "unexpected_provider_error",
+                    "Модель вернула непредвиденную ошибку.",
+                    retryable=False,
+                )
+        finally:
+            accepting_events.clear()
+
+    def _acquire_slot(
+        self,
+        deadline: float,
+        cancel_event: threading.Event | None,
+    ) -> None:
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise GatewayCallCancelled
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GatewayCallDeadline
+            if self._slots.acquire(timeout=min(self._poll_interval_seconds, remaining)):
+                return
 
 
 class LangChainGatewayFactory:
@@ -51,6 +181,7 @@ class OpenAICompatibleGateway:
         messages: Sequence[dict[str, str]],
         *,
         timeout_seconds: float,
+        on_chunk: ChunkCallback | None = None,
     ) -> str:
         try:
             from langchain_openai import ChatOpenAI
@@ -64,7 +195,10 @@ class OpenAICompatibleGateway:
                 streaming=False,
             )
             response = model.invoke(_langchain_messages(messages))
-            return _response_text(response.content)
+            text = _response_text(response.content)
+            if on_chunk is not None:
+                on_chunk(text)
+            return text
         except GatewayFailure:
             raise
         except Exception as exc:
@@ -80,6 +214,7 @@ class GigaChatGateway:
         messages: Sequence[dict[str, str]],
         *,
         timeout_seconds: float,
+        on_chunk: ChunkCallback | None = None,
     ) -> str:
         try:
             from langchain_gigachat import GigaChat
@@ -93,7 +228,10 @@ class GigaChatGateway:
                 streaming=False,
             )
             response = model.invoke(_langchain_messages(messages))
-            return _response_text(response.content)
+            text = _response_text(response.content)
+            if on_chunk is not None:
+                on_chunk(text)
+            return text
         except GatewayFailure:
             raise
         except Exception as exc:
@@ -137,16 +275,33 @@ def _response_text(content: object) -> str:
         for block in content:
             if isinstance(block, str):
                 parts.append(block)
-            elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            elif (
+                isinstance(block, dict)
+                and block.get("type") in {None, "text"}
+                and isinstance(block.get("text"), str)
+            ):
                 parts.append(block["text"])
+            else:
+                raise GatewayFailure(
+                    "invalid_response",
+                    "Модель вернула повреждённый ответ.",
+                    retryable=False,
+                )
         text = "\n".join(parts).strip()
     else:
-        text = str(content).strip() if content is not None else ""
+        if content is None:
+            text = ""
+        else:
+            raise GatewayFailure(
+                "invalid_response",
+                "Модель вернула повреждённый ответ.",
+                retryable=False,
+            )
     if not text:
         raise GatewayFailure(
             "empty_response",
             "Модель вернула пустой ответ.",
-            retryable=True,
+            retryable=False,
         )
     return text
 
@@ -225,4 +380,3 @@ def _status_code(exc: Exception) -> int | None:
         if isinstance(value, int):
             return value
     return None
-

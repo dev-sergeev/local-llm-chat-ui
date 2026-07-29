@@ -49,7 +49,9 @@ def test_module_starts_real_localhost_service_and_stops_cleanly(tmp_path):
             if process.poll() is not None:
                 break
             try:
-                with urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.3) as response:
+                with urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=0.3
+                ) as response:
                     assert response.status == 200
                     break
             except Exception as exc:

@@ -12,6 +12,7 @@
 - `POST /api/profiles` — создать профиль;
 - `PUT /api/profiles/{id}` — изменить; пустой токен сохраняет прежний;
 - `DELETE /api/profiles/{id}` — удалить, не удаляя исторические снимки;
+- `POST /api/profiles/test` — проверить ещё не сохранённые значения формы без записи секрета;
 - `POST /api/profiles/{id}/test` — короткая проверка подключения без записи в чат.
 
 ## Диалоги
@@ -19,7 +20,7 @@
 - `GET /api/conversations?query=...` — список и поиск;
 - `POST /api/conversations` — новый диалог;
 - `GET /api/conversations/{id}` — активная ветка, варианты и состояние генерации;
-- `PATCH /api/conversations/{id}` — название или активный профиль;
+- `PATCH /api/conversations/{id}` — атомарно изменить название и/или активный профиль;
 - `DELETE /api/conversations/{id}` — подтверждаемое удаление;
 - `POST /api/conversations/{id}/messages` — новое сообщение и фоновая генерация;
 - `POST /api/conversations/{id}/select` — выбрать версию сообщения и её последнюю ветку.

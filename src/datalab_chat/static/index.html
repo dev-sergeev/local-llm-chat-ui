@@ -62,7 +62,7 @@
           <button class="chat-title" id="chat-title" type="button" title="Переименовать диалог">Новый чат</button>
           <div class="topbar-actions">
             <label class="model-picker" for="model-select">
-              <span>Модель</span>
+              <span>Профиль</span>
               <select id="model-select" aria-label="Активный профиль модели"></select>
             </label>
             <button class="button button-secondary compact" id="manage-models-top" type="button">Настроить</button>
@@ -78,7 +78,7 @@
           <p class="welcome-copy">Работайте с GigaChat и OpenAI-compatible моделями, сохраняя историю и секреты только на этом компьютере.</p>
           <div class="welcome-actions">
             <button class="button button-primary" id="welcome-new-chat" type="button">Начать диалог</button>
-            <button class="button button-secondary" id="welcome-add-model" type="button">Добавить модель</button>
+            <button class="button button-secondary" id="welcome-add-model" type="button">Добавить профиль</button>
           </div>
           <div class="feature-strip" aria-label="Возможности">
             <div><strong>Локально</strong><span>SQLite и .env</span></div>
@@ -144,7 +144,7 @@
                 </select>
               </label>
               <label class="field">
-                <span>URL модели</span>
+                <span>URL подключения</span>
                 <input name="base_url" type="url" maxlength="2048" required placeholder="Адрес API в закрытом контуре" autocomplete="off" spellcheck="false">
               </label>
               <label class="field">

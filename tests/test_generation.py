@@ -24,13 +24,15 @@ class ScriptedGateway:
         self.outcomes = list(outcomes)
         self.calls: list[tuple[list[dict[str, str]], float]] = []
 
-    def complete(self, messages, *, timeout_seconds):
+    def complete(self, messages, *, timeout_seconds, on_chunk=None):
         self.calls.append((messages, timeout_seconds))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
         if callable(outcome):
             return outcome()
+        if on_chunk is not None:
+            on_chunk(outcome)
         return outcome
 
 
@@ -124,9 +126,9 @@ def test_non_retryable_failure_is_safe_and_immediate(tmp_path):
     assert result.error_code == "authentication"
     assert result.error_message == "Проверьте токен."
     assert len(gateway.calls) == 1
-    assert [message.role for message in memory.get_conversation(conversation.id).messages] == [
-        "user"
-    ]
+    assert [
+        message.role for message in memory.get_conversation(conversation.id).messages
+    ] == ["user"]
 
 
 def test_total_deadline_discards_a_late_response(tmp_path):
@@ -150,9 +152,9 @@ def test_total_deadline_discards_a_late_response(tmp_path):
     result = memory.get_generation(generation.id)
     assert result.status is GenerationStatus.FAILED
     assert result.error_code == "deadline_exceeded"
-    assert [message.role for message in memory.get_conversation(conversation.id).messages] == [
-        "user"
-    ]
+    assert [
+        message.role for message in memory.get_conversation(conversation.id).messages
+    ] == ["user"]
     time.sleep(0.16)
     assert memory.get_generation(generation.id).status is GenerationStatus.FAILED
 
@@ -191,3 +193,45 @@ def test_unexpected_adapter_exception_does_not_escape_worker(tmp_path):
     assert result.status is GenerationStatus.FAILED
     assert result.error_code == "unexpected_provider_error"
     assert "secret internals" not in result.error_message
+
+
+def test_empty_answer_is_not_retried(tmp_path):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    _, generation = new_generation(memory)
+    gateway = ScriptedGateway(["", "must not be requested"])
+    coordinator = GenerationCoordinator(memory, FixedFactory(gateway), policy=policy())
+
+    coordinator.submit(generation.id, CONNECTION)
+    assert coordinator.wait(generation.id, timeout=1)
+
+    result = memory.get_generation(generation.id)
+    assert result.status is GenerationStatus.FAILED
+    assert result.error_code == "empty_response"
+    assert result.attempts == 1
+    assert len(gateway.calls) == 1
+
+
+def test_transport_chunks_cross_coordinator_boundary_without_partial_persistence(
+    tmp_path,
+):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    conversation, generation = new_generation(memory)
+
+    class ChunkGateway:
+        def complete(self, messages, *, timeout_seconds, on_chunk=None):
+            on_chunk("PD — ")
+            on_chunk("вероятность дефолта")
+            return "PD — вероятность дефолта"
+
+    chunks = []
+    coordinator = GenerationCoordinator(
+        memory, FixedFactory(ChunkGateway()), policy=policy()
+    )
+
+    coordinator.submit(generation.id, CONNECTION, on_chunk=chunks.append)
+    assert coordinator.wait(generation.id, timeout=1)
+
+    assert chunks == ["PD — ", "вероятность дефолта"]
+    assert memory.get_conversation(conversation.id).messages[-1].content == (
+        "PD — вероятность дефолта"
+    )

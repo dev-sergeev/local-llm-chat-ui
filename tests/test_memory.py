@@ -11,13 +11,14 @@ from datalab_chat.memory import (
     MemoryValidationError,
     SQLiteChatMemory,
 )
+from datalab_chat.profiles import ModelSnapshot, ProfileFormat
 
 
-SNAPSHOT = {
-    "display_name": "Giga PROD",
-    "format": "gigachat",
-    "model_id": "risk-model",
-}
+SNAPSHOT = ModelSnapshot(
+    display_name="Giga PROD",
+    provider_format=ProfileFormat.GIGACHAT,
+    model_id="risk-model",
+)
 
 
 def complete(memory: SQLiteChatMemory, generation_id: str, content: str):
@@ -56,7 +57,9 @@ def test_edit_and_regenerate_create_navigable_branches(tmp_path):
     follow_up = memory.begin_user_generation(conversation.id, "Уточнение", "profile-a")
     complete(memory, follow_up.id, "Ответ на уточнение")
 
-    edited = memory.begin_edit_generation(first.prompt_message_id, "Изменённый вопрос", "profile-a")
+    edited = memory.begin_edit_generation(
+        first.prompt_message_id, "Изменённый вопрос", "profile-a"
+    )
     edited_answer = complete(memory, edited.id, "Ответ на изменение")
 
     active = memory.get_conversation(conversation.id)
@@ -114,14 +117,18 @@ def test_failed_generation_keeps_prompt_and_can_be_retried(tmp_path):
     assert failed.active_generation.error_code == "provider_unavailable"
     retry = memory.begin_retry_generation(generation.id, "profile-a")
     complete(memory, retry.id, "Готовый ответ")
-    assert memory.get_conversation(conversation.id).messages[-1].content == "Готовый ответ"
+    assert (
+        memory.get_conversation(conversation.id).messages[-1].content == "Готовый ответ"
+    )
 
 
 def test_restart_marks_unfinished_generation_as_interrupted(tmp_path):
     database = tmp_path / "chat.db"
     memory = SQLiteChatMemory(database)
     conversation = memory.create_conversation("profile-a")
-    generation = memory.begin_user_generation(conversation.id, "Долгий вопрос", "profile-a")
+    generation = memory.begin_user_generation(
+        conversation.id, "Долгий вопрос", "profile-a"
+    )
     memory.mark_generation_running(generation.id, attempt=2)
 
     restarted = SQLiteChatMemory(database)
@@ -158,7 +165,9 @@ def test_only_one_generation_can_be_active_in_a_conversation(tmp_path):
         memory.begin_user_generation(conversation.id, "Второй", "profile-a")
 
     memory.cancel_generation(generation.id)
-    next_generation = memory.begin_user_generation(conversation.id, "Второй", "profile-a")
+    next_generation = memory.begin_user_generation(
+        conversation.id, "Второй", "profile-a"
+    )
     assert next_generation.status is GenerationStatus.QUEUED
 
 

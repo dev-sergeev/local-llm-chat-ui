@@ -20,6 +20,7 @@ print("risk")
   assert.match(html, /<strong>важно<\/strong>/);
   assert.match(html, /<code>точно<\/code>/);
   assert.match(html, /data-copy-code/);
+  assert.match(html, /data-action="copy-code"/);
   assert.match(html, /language-python/);
   assert.match(html, /print\(&quot;risk&quot;\)/);
 });

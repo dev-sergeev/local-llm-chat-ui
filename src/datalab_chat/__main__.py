@@ -78,7 +78,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except Exception as exc:
         LOGGER.error("Startup failed: %s", type(exc).__name__)
-        print("Не удалось подготовить локальный сервис. Проверьте .data и .env.", file=sys.stderr)
+        print(
+            "Не удалось подготовить локальный сервис. Проверьте .data и .env.",
+            file=sys.stderr,
+        )
         return 2
     finally:
         if server is not None:

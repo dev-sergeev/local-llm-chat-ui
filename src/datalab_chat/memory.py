@@ -12,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from datalab_chat.profiles import ModelSnapshot
+
 
 class MemoryError(Exception):
     """Base error exposed by the conversation-memory interface."""
@@ -74,7 +76,7 @@ class MessageView:
     parent_id: str | None
     role: str
     content: str
-    model_snapshot: dict[str, str] | None
+    model_snapshot: ModelSnapshot | None
     created_at: str
     variant_index: int
     variant_count: int
@@ -86,7 +88,9 @@ class MessageView:
             "parent_id": self.parent_id,
             "role": self.role,
             "content": self.content,
-            "model_snapshot": self.model_snapshot,
+            "model_snapshot": (
+                self.model_snapshot.to_public_dict() if self.model_snapshot else None
+            ),
             "created_at": self.created_at,
             "variant_index": self.variant_index,
             "variant_count": self.variant_count,
@@ -145,7 +149,9 @@ class ConversationView:
             "updated_at": self.updated_at,
             "messages": [message.to_public_dict() for message in self.messages],
             "active_generation": (
-                self.active_generation.to_public_dict() if self.active_generation else None
+                self.active_generation.to_public_dict()
+                if self.active_generation
+                else None
             ),
         }
 
@@ -216,35 +222,56 @@ class SQLiteChatMemory:
             active_generation=active_generation,
         )
 
-    def rename_conversation(self, conversation_id: str, title: str) -> ConversationSummary:
-        clean_title = " ".join(title.split())
-        if not clean_title or len(clean_title) > 120:
-            raise MemoryValidationError("Название диалога должно содержать от 1 до 120 символов.")
-        timestamp = _now()
-        with self._write() as connection:
-            self._conversation_row(connection, conversation_id)
-            connection.execute(
-                """
-                UPDATE conversations
-                SET title = ?, title_is_auto = 0, updated_at = ?
-                WHERE id = ?
-                """,
-                (clean_title, timestamp, conversation_id),
-            )
-            row = self._conversation_row(connection, conversation_id)
-        return self._conversation_summary(row)
+    def rename_conversation(
+        self, conversation_id: str, title: str
+    ) -> ConversationSummary:
+        return self.update_conversation(conversation_id, title=title)
 
     def set_active_profile(
         self,
         conversation_id: str,
         profile_id: str | None,
     ) -> ConversationSummary:
+        return self.update_conversation(
+            conversation_id,
+            profile_id=profile_id,
+            set_profile=True,
+        )
+
+    def update_conversation(
+        self,
+        conversation_id: str,
+        *,
+        title: str | None = None,
+        profile_id: str | None = None,
+        set_profile: bool = False,
+    ) -> ConversationSummary:
+        if title is None and not set_profile:
+            raise MemoryValidationError("Не указаны изменения диалога.")
+        clean_title = None
+        if title is not None:
+            clean_title = " ".join(title.split())
+            if not clean_title or len(clean_title) > 120:
+                raise MemoryValidationError(
+                    "Название диалога должно содержать от 1 до 120 символов."
+                )
         timestamp = _now()
+        updates: list[str] = []
+        values: list[object] = []
+        if clean_title is not None:
+            updates.extend(["title = ?", "title_is_auto = 0"])
+            values.append(clean_title)
+        if set_profile:
+            updates.append("active_profile_id = ?")
+            values.append(profile_id)
+        updates.append("updated_at = ?")
+        values.extend([timestamp, conversation_id])
+
         with self._write() as connection:
             self._conversation_row(connection, conversation_id)
             connection.execute(
-                "UPDATE conversations SET active_profile_id = ?, updated_at = ? WHERE id = ?",
-                (profile_id, timestamp, conversation_id),
+                f"UPDATE conversations SET {', '.join(updates)} WHERE id = ?",
+                values,
             )
             row = self._conversation_row(connection, conversation_id)
         return self._conversation_summary(row)
@@ -263,7 +290,9 @@ class SQLiteChatMemory:
     def delete_conversation(self, conversation_id: str) -> None:
         with self._write() as connection:
             self._conversation_row(connection, conversation_id)
-            connection.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            connection.execute(
+                "DELETE FROM conversations WHERE id = ?", (conversation_id,)
+            )
 
     def begin_user_generation(
         self,
@@ -316,7 +345,9 @@ class SQLiteChatMemory:
         with self._write() as connection:
             source = self._message_row(connection, message_id)
             if source["role"] != "user":
-                raise MemoryValidationError("Редактировать можно только сообщение пользователя.")
+                raise MemoryValidationError(
+                    "Редактировать можно только сообщение пользователя."
+                )
             conversation_id = source["conversation_id"]
             self._assert_no_pending_generation(connection, conversation_id)
             edited_id = self._insert_message(
@@ -349,10 +380,14 @@ class SQLiteChatMemory:
         with self._write() as connection:
             source = self._message_row(connection, message_id)
             if source["role"] != "assistant" or not source["parent_id"]:
-                raise MemoryValidationError("Регенерация доступна только для ответа ассистента.")
+                raise MemoryValidationError(
+                    "Регенерация доступна только для ответа ассистента."
+                )
             prompt = self._message_row(connection, source["parent_id"])
             if prompt["role"] != "user":
-                raise MemoryValidationError("Ответ не связан с сообщением пользователя.")
+                raise MemoryValidationError(
+                    "Ответ не связан с сообщением пользователя."
+                )
             conversation_id = source["conversation_id"]
             self._assert_no_pending_generation(connection, conversation_id)
             connection.execute(
@@ -372,7 +407,9 @@ class SQLiteChatMemory:
             row = self._generation_row(connection, generation_id)
         return self._generation_view(row)
 
-    def begin_retry_generation(self, generation_id: str, profile_id: str) -> GenerationView:
+    def begin_retry_generation(
+        self, generation_id: str, profile_id: str
+    ) -> GenerationView:
         _validated_profile_id(profile_id)
         with self._write() as connection:
             source = self._generation_row(connection, generation_id)
@@ -381,7 +418,9 @@ class SQLiteChatMemory:
                 GenerationStatus.CANCELLED.value,
                 GenerationStatus.INTERRUPTED.value,
             }:
-                raise MemoryConflict("Эту генерацию нельзя повторить в текущем состоянии.")
+                raise MemoryConflict(
+                    "Эту генерацию нельзя повторить в текущем состоянии."
+                )
             conversation_id = source["conversation_id"]
             self._assert_no_pending_generation(connection, conversation_id)
             prompt = self._message_row(connection, source["prompt_message_id"])
@@ -424,7 +463,9 @@ class SQLiteChatMemory:
     def conversation_for_message(self, message_id: str) -> ConversationSummary:
         with self._read() as connection:
             message = self._message_row(connection, message_id)
-            conversation = self._conversation_row(connection, message["conversation_id"])
+            conversation = self._conversation_row(
+                connection, message["conversation_id"]
+            )
         return self._conversation_summary(conversation)
 
     def context_for_generation(self, generation_id: str) -> list[dict[str, str]]:
@@ -433,7 +474,9 @@ class SQLiteChatMemory:
             rows = self._active_path_rows(connection, generation["prompt_message_id"])
         return [{"role": row["role"], "content": row["content"]} for row in rows]
 
-    def mark_generation_running(self, generation_id: str, *, attempt: int) -> GenerationView:
+    def mark_generation_running(
+        self, generation_id: str, *, attempt: int
+    ) -> GenerationView:
         if attempt < 1:
             raise MemoryValidationError("Номер попытки должен быть положительным.")
         with self._write() as connection:
@@ -486,10 +529,11 @@ class SQLiteChatMemory:
         self,
         generation_id: str,
         content: str,
-        model_snapshot: dict[str, str],
+        model_snapshot: ModelSnapshot,
     ) -> MessageView:
         clean_content = _validated_content(content)
-        clean_snapshot = _validated_snapshot(model_snapshot)
+        if not isinstance(model_snapshot, ModelSnapshot):
+            raise MemoryValidationError("Снимок модели имеет неверный формат.")
         with self._write() as connection:
             generation = self._generation_row(connection, generation_id)
             self._assert_pending(generation)
@@ -501,7 +545,7 @@ class SQLiteChatMemory:
                 parent_id=generation["prompt_message_id"],
                 role="assistant",
                 content=clean_content,
-                model_snapshot=clean_snapshot,
+                model_snapshot=model_snapshot,
             )
             timestamp = _now()
             connection.execute(
@@ -511,7 +555,12 @@ class SQLiteChatMemory:
                     error_message = NULL, updated_at = ?
                 WHERE id = ?
                 """,
-                (GenerationStatus.SUCCEEDED.value, message_id, timestamp, generation_id),
+                (
+                    GenerationStatus.SUCCEEDED.value,
+                    message_id,
+                    timestamp,
+                    generation_id,
+                ),
             )
             connection.execute(
                 """
@@ -584,7 +633,10 @@ class SQLiteChatMemory:
 
     def is_generation_cancelled(self, generation_id: str) -> bool:
         generation = self.get_generation(generation_id)
-        return generation.cancel_requested or generation.status is GenerationStatus.CANCELLED
+        return (
+            generation.cancel_requested
+            or generation.status is GenerationStatus.CANCELLED
+        )
 
     def recover_interrupted_generations(self) -> int:
         with self._write() as connection:
@@ -592,7 +644,7 @@ class SQLiteChatMemory:
                 f"""
                 UPDATE generations
                 SET status = ?, error_code = ?, error_message = ?, updated_at = ?
-                WHERE status IN ({','.join('?' for _ in _PENDING_STATUSES)})
+                WHERE status IN ({",".join("?" for _ in _PENDING_STATUSES)})
                 """,
                 (
                     GenerationStatus.INTERRUPTED.value,
@@ -658,7 +710,9 @@ class SQLiteChatMemory:
                     )
                     version = connection.execute("PRAGMA user_version").fetchone()[0]
                     if version not in (0, self._SCHEMA_VERSION):
-                        raise MemoryStorageError("Версия локальной базы данных не поддерживается.")
+                        raise MemoryStorageError(
+                            "Версия локальной базы данных не поддерживается."
+                        )
                     connection.execute(f"PRAGMA user_version = {self._SCHEMA_VERSION}")
                 finally:
                     connection.close()
@@ -666,7 +720,9 @@ class SQLiteChatMemory:
             except MemoryError:
                 raise
             except (OSError, sqlite3.Error) as exc:
-                raise MemoryStorageError("Не удалось подготовить локальную базу диалогов.") from exc
+                raise MemoryStorageError(
+                    "Не удалось подготовить локальную базу диалогов."
+                ) from exc
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
@@ -720,7 +776,9 @@ class SQLiteChatMemory:
                 if candidate.exists():
                     os.chmod(candidate, 0o600)
             except OSError as exc:
-                raise MemoryStorageError("Не удалось ограничить права локальной базы.") from exc
+                raise MemoryStorageError(
+                    "Не удалось ограничить права локальной базы."
+                ) from exc
 
     def _conversation_row(
         self,
@@ -735,7 +793,9 @@ class SQLiteChatMemory:
             raise MemoryNotFound("Диалог не найден.")
         return row
 
-    def _message_row(self, connection: sqlite3.Connection, message_id: str) -> sqlite3.Row:
+    def _message_row(
+        self, connection: sqlite3.Connection, message_id: str
+    ) -> sqlite3.Row:
         row = connection.execute(
             "SELECT * FROM messages WHERE id = ?",
             (message_id,),
@@ -782,7 +842,9 @@ class SQLiteChatMemory:
             updated_at=row["updated_at"],
         )
 
-    def _message_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> MessageView:
+    def _message_view(
+        self, connection: sqlite3.Connection, row: sqlite3.Row
+    ) -> MessageView:
         siblings = connection.execute(
             """
             SELECT id FROM messages
@@ -793,7 +855,14 @@ class SQLiteChatMemory:
             (row["conversation_id"], row["role"], row["parent_id"], row["parent_id"]),
         ).fetchall()
         sibling_ids = [item["id"] for item in siblings]
-        snapshot = json.loads(row["model_snapshot"]) if row["model_snapshot"] else None
+        try:
+            snapshot = (
+                ModelSnapshot.from_dict(json.loads(row["model_snapshot"]))
+                if row["model_snapshot"]
+                else None
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise MemoryStorageError("Сохранённый снимок модели повреждён.") from exc
         return MessageView(
             id=row["id"],
             parent_id=row["parent_id"],
@@ -860,7 +929,7 @@ class SQLiteChatMemory:
         row = connection.execute(
             f"""
             SELECT id FROM generations
-            WHERE conversation_id = ? AND status IN ({','.join('?' for _ in _PENDING_STATUSES)})
+            WHERE conversation_id = ? AND status IN ({",".join("?" for _ in _PENDING_STATUSES)})
             LIMIT 1
             """,
             (conversation_id, *_PENDING_STATUSES),
@@ -880,7 +949,7 @@ class SQLiteChatMemory:
         parent_id: str | None,
         role: str,
         content: str,
-        model_snapshot: dict[str, str] | None,
+        model_snapshot: ModelSnapshot | None,
     ) -> str:
         message_id = uuid.uuid4().hex
         connection.execute(
@@ -895,7 +964,11 @@ class SQLiteChatMemory:
                 parent_id,
                 role,
                 content,
-                json.dumps(model_snapshot, ensure_ascii=False) if model_snapshot else None,
+                (
+                    json.dumps(model_snapshot.to_public_dict(), ensure_ascii=False)
+                    if model_snapshot
+                    else None
+                ),
                 _now(),
             ),
         )
@@ -974,13 +1047,6 @@ def _validated_content(content: str) -> str:
 def _validated_profile_id(profile_id: str) -> None:
     if not profile_id or len(profile_id) > 200:
         raise MemoryValidationError("Не указан профиль модели.")
-
-
-def _validated_snapshot(snapshot: dict[str, str]) -> dict[str, str]:
-    expected = {"display_name", "format", "model_id"}
-    if set(snapshot) != expected or any(not isinstance(value, str) for value in snapshot.values()):
-        raise MemoryValidationError("Снимок модели имеет неверный формат.")
-    return {key: snapshot[key] for key in ("display_name", "format", "model_id")}
 
 
 def _automatic_title(content: str) -> str:

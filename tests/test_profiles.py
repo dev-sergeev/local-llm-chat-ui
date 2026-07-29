@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import subprocess
 
 import pytest
 
@@ -107,6 +108,32 @@ def test_catalog_preserves_unrelated_env_values_and_special_characters(tmp_path)
     assert reloaded.resolve(profile.id).token == "token=#quoted value"
     assert reloaded.get(profile.id).display_name == 'Model "A" # test'
     assert "BANK_CA_BUNDLE=/etc/bank/ca.pem" in env_path.read_text(encoding="utf-8")
+
+
+def test_generated_env_is_safe_to_source_with_shell_metacharacters(tmp_path):
+    env_path = tmp_path / ".env"
+    marker = tmp_path / "must-not-exist"
+    token = f"literal $VALUE `touch {marker}` $(touch {marker}) ' quote"
+    catalog = EnvProfileCatalog(env_path)
+    profile = catalog.create(draft("Shell-safe", ProfileFormat.OPENAI, token))
+    token_key = f"DATALAB_PROFILE_{profile.id}_TOKEN"
+
+    result = subprocess.run(
+        [
+            "/bin/sh",
+            "-c",
+            f'. "$1"; printf %s "${{{token_key}}}"',
+            "source-test",
+            str(env_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout == token
+    assert not marker.exists()
+    assert catalog.resolve(profile.id).token == token
 
 
 def test_delete_removes_profile_and_unknown_ids_are_explicit(tmp_path):

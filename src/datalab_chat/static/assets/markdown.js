@@ -30,7 +30,7 @@ export function renderMarkdown(source) {
       (_match, rawLanguage, rawCode) => {
         const language = String(rawLanguage).trim().replace(/[^a-zA-Z0-9_+-]/g, "").slice(0, 40);
         const label = language || "code";
-        const html = `<div class="code-block"><div class="code-toolbar"><span>${escapeHtml(label)}</span><button type="button" data-copy-code aria-label="Копировать код">Копировать</button></div><pre><code class="language-${escapeHtml(language || "plain")}">${escapeHtml(String(rawCode).replace(/\n$/, ""))}</code></pre></div>`;
+        const html = `<div class="code-block"><div class="code-toolbar"><span>${escapeHtml(label)}</span><button type="button" data-action="copy-code" data-copy-code aria-label="Копировать код">Копировать</button></div><pre><code class="language-${escapeHtml(language || "plain")}">${escapeHtml(String(rawCode).replace(/\n$/, ""))}</code></pre></div>`;
         const token = `${TOKEN_START}BLOCK${blockTokens.length}${TOKEN_END}`;
         blockTokens.push(html);
         return `\n${token}\n`;

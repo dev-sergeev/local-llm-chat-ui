@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -8,7 +9,12 @@ from datalab_chat.application import ChatApplication
 from datalab_chat.gateways import GatewayFailure
 from datalab_chat.generation import GenerationPolicy
 from datalab_chat.memory import GenerationStatus, SQLiteChatMemory
-from datalab_chat.profiles import EnvProfileCatalog, ProfileDraft, ProfileFormat, ProfileNotFound
+from datalab_chat.profiles import (
+    EnvProfileCatalog,
+    ProfileDraft,
+    ProfileFormat,
+    ProfileNotFound,
+)
 
 
 class QueueGateway:
@@ -16,11 +22,15 @@ class QueueGateway:
         self.outcomes = list(outcomes)
         self.calls = []
 
-    def complete(self, messages, *, timeout_seconds):
+    def complete(self, messages, *, timeout_seconds, on_chunk=None):
         self.calls.append((messages, timeout_seconds))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
+        if callable(outcome):
+            return outcome()
+        if on_chunk is not None:
+            on_chunk(outcome)
         return outcome
 
 
@@ -36,10 +46,11 @@ class QueueFactory:
 
 def make_app(tmp_path, outcomes):
     gateway = QueueGateway(outcomes)
+    factory = QueueFactory(gateway)
     app = ChatApplication(
         EnvProfileCatalog(tmp_path / ".env"),
         SQLiteChatMemory(tmp_path / "chat.db"),
-        QueueFactory(gateway),
+        factory,
         generation_policy=GenerationPolicy(
             total_timeout_seconds=1,
             max_attempts=3,
@@ -49,7 +60,7 @@ def make_app(tmp_path, outcomes):
             poll_interval_seconds=0.005,
         ),
     )
-    return app, gateway
+    return app, gateway, factory
 
 
 def add_profile(app, *, name="Giga PROD", provider_format=ProfileFormat.GIGACHAT):
@@ -79,7 +90,9 @@ def wait_terminal(app, generation_id):
 
 
 def test_user_flow_is_available_through_one_application_interface(tmp_path):
-    app, gateway = make_app(tmp_path, ["Первый ответ", "Ответ после изменения", "Ещё вариант"])
+    app, gateway, _ = make_app(
+        tmp_path, ["Первый ответ", "Ответ после изменения", "Ещё вариант"]
+    )
     profile = add_profile(app)
     conversation = app.create_conversation()
     assert conversation.active_profile_id == profile.id
@@ -87,7 +100,10 @@ def test_user_flow_is_available_through_one_application_interface(tmp_path):
     generation = app.send_message(conversation.id, "Первый вопрос")
     assert wait_terminal(app, generation.id).status is GenerationStatus.SUCCEEDED
     view = app.get_conversation(conversation.id)
-    assert [message.content for message in view.messages] == ["Первый вопрос", "Первый ответ"]
+    assert [message.content for message in view.messages] == [
+        "Первый вопрос",
+        "Первый ответ",
+    ]
 
     edited = app.edit_message(view.messages[0].id, "Изменённый вопрос")
     wait_terminal(app, edited.id)
@@ -107,7 +123,7 @@ def test_user_flow_is_available_through_one_application_interface(tmp_path):
 
 
 def test_model_can_change_for_the_next_message_only(tmp_path):
-    app, _ = make_app(tmp_path, ["Giga answer", "OpenAI answer"])
+    app, _, _ = make_app(tmp_path, ["Giga answer", "OpenAI answer"])
     giga = add_profile(app)
     openai = add_profile(app, name="OpenAI TEST", provider_format=ProfileFormat.OPENAI)
     conversation = app.create_conversation(giga.id)
@@ -118,15 +134,17 @@ def test_model_can_change_for_the_next_message_only(tmp_path):
     wait_terminal(app, second.id)
 
     view = app.get_conversation(conversation.id)
-    assistant_messages = [message for message in view.messages if message.role == "assistant"]
-    assert assistant_messages[0].model_snapshot["display_name"] == "Giga PROD"
-    assert assistant_messages[1].model_snapshot["display_name"] == "OpenAI TEST"
+    assistant_messages = [
+        message for message in view.messages if message.role == "assistant"
+    ]
+    assert assistant_messages[0].model_snapshot.display_name == "Giga PROD"
+    assert assistant_messages[1].model_snapshot.display_name == "OpenAI TEST"
     assert view.active_profile_id == openai.id
     app.shutdown()
 
 
 def test_deleting_profile_clears_selection_but_keeps_readable_history(tmp_path):
-    app, _ = make_app(tmp_path, ["Сохранённый ответ"])
+    app, _, _ = make_app(tmp_path, ["Сохранённый ответ"])
     profile = add_profile(app)
     conversation = app.create_conversation(profile.id)
     generation = app.send_message(conversation.id, "Вопрос")
@@ -136,14 +154,14 @@ def test_deleting_profile_clears_selection_but_keeps_readable_history(tmp_path):
 
     view = app.get_conversation(conversation.id)
     assert view.active_profile_id is None
-    assert view.messages[-1].model_snapshot["display_name"] == "Giga PROD"
+    assert view.messages[-1].model_snapshot.display_name == "Giga PROD"
     with pytest.raises(ProfileNotFound):
         app.send_message(conversation.id, "Новый вопрос", profile.id)
     app.shutdown()
 
 
 def test_connection_check_is_not_written_to_chat_history(tmp_path):
-    app, gateway = make_app(tmp_path, ["OK"])
+    app, gateway, _ = make_app(tmp_path, ["OK"])
     profile = add_profile(app)
 
     result = app.test_profile(profile.id, timeout_seconds=0.5)
@@ -159,7 +177,7 @@ def test_connection_check_is_not_written_to_chat_history(tmp_path):
 
 
 def test_connection_check_returns_only_sanitized_gateway_failure(tmp_path):
-    app, _ = make_app(
+    app, _, _ = make_app(
         tmp_path,
         [GatewayFailure("authentication", "Проверьте токен.", retryable=False)],
     )
@@ -170,6 +188,66 @@ def test_connection_check_returns_only_sanitized_gateway_failure(tmp_path):
 
     assert failure.value.code == "authentication"
     assert "secret-token" not in failure.value.message
+    app.shutdown()
+
+
+def test_connection_check_enforces_deadline_when_adapter_ignores_timeout(tmp_path):
+    release = threading.Event()
+    app, _, _ = make_app(tmp_path, [lambda: release.wait(1) or "late"])
+    profile = add_profile(app)
+    started = time.monotonic()
+
+    with pytest.raises(GatewayFailure) as failure:
+        app.test_profile(profile.id, timeout_seconds=0.03)
+
+    assert failure.value.code == "request_timeout"
+    assert time.monotonic() - started < 0.2
+    release.set()
+    app.shutdown()
+
+
+def test_connection_check_uses_unsaved_form_values_without_persisting_them(tmp_path):
+    app, gateway, factory = make_app(tmp_path, ["OK"])
+    profile = add_profile(app)
+
+    result = app.test_profile_draft(
+        ProfileDraft(
+            display_name="Изменённое имя",
+            provider_format=ProfileFormat.OPENAI,
+            base_url="https://draft.gateway.local/v1",
+            token="draft-secret",
+            model_id="draft-model",
+        ),
+        profile_id=profile.id,
+        timeout_seconds=0.5,
+    )
+
+    assert result.ok is True
+    tested = factory.connections[-1]
+    assert tested.base_url == "https://draft.gateway.local/v1"
+    assert tested.token == "draft-secret"
+    assert tested.model_id == "draft-model"
+    assert app.get_profile(profile.id).base_url == "https://gateway.bank.local/v1"
+    assert gateway.calls
+    app.shutdown()
+
+
+def test_combined_conversation_update_is_atomic_when_profile_is_invalid(tmp_path):
+    app, _, _ = make_app(tmp_path, [])
+    profile = add_profile(app)
+    conversation = app.create_conversation(profile.id)
+
+    with pytest.raises(ProfileNotFound):
+        app.update_conversation(
+            conversation.id,
+            title="Не должно сохраниться",
+            profile_id="missing-profile",
+            set_profile=True,
+        )
+
+    unchanged = app.get_conversation(conversation.id)
+    assert unchanged.title == "Новый чат"
+    assert unchanged.active_profile_id == profile.id
     app.shutdown()
 
 
@@ -186,10 +264,14 @@ def test_application_recovers_unfinished_work_on_start(tmp_path):
         )
     )
     conversation = memory.create_conversation(profile.id)
-    generation = memory.begin_user_generation(conversation.id, "До рестарта", profile.id)
+    generation = memory.begin_user_generation(
+        conversation.id, "До рестарта", profile.id
+    )
     memory.mark_generation_running(generation.id, attempt=1)
 
-    app = ChatApplication(env, SQLiteChatMemory(tmp_path / "chat.db"), QueueFactory(QueueGateway([])))
+    app = ChatApplication(
+        env, SQLiteChatMemory(tmp_path / "chat.db"), QueueFactory(QueueGateway([]))
+    )
 
     assert app.get_generation(generation.id).status is GenerationStatus.INTERRUPTED
     app.shutdown()
