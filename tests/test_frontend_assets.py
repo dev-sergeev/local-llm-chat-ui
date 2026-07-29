@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 
 
 STATIC = Path("src/datalab_chat/static")
@@ -36,7 +37,7 @@ class DocumentContract(HTMLParser):
             self._inside_script_without_src = False
 
 
-def test_frontend_has_complete_offline_dom_contract():
+def test_frontend_has_complete_dom_contract():
     parser = DocumentContract()
     parser.feed((STATIC / "index.html").read_text(encoding="utf-8"))
 
@@ -58,8 +59,8 @@ def test_frontend_has_complete_offline_dom_contract():
         "profile-form",
         "toast-region",
     } <= parser.ids
-    assert parser.stylesheets == ["/assets/app.css"]
-    assert parser.scripts == [{"type": "module", "src": "/assets/app.js"}]
+    assert parser.stylesheets == ["assets/app.css"]
+    assert parser.scripts == [{"type": "module", "src": "assets/app.js"}]
     assert parser.inline_scripts == 0
 
 
@@ -78,7 +79,29 @@ def test_frontend_assets_are_self_contained_and_do_not_reference_cdn():
     assert "cdn" not in combined.lower()
 
 
+def test_frontend_assets_follow_a_path_prefixed_localhost_proxy():
+    parser = DocumentContract()
+    parser.feed((STATIC / "index.html").read_text(encoding="utf-8"))
+    forwarded_page = "https://preview.example/forwarded/8765/"
+
+    assert urljoin(forwarded_page, parser.stylesheets[0]) == (
+        forwarded_page + "assets/app.css"
+    )
+    assert urljoin(forwarded_page, parser.scripts[0]["src"]) == (
+        forwarded_page + "assets/app.js"
+    )
+
+
 def test_mutating_requests_include_local_ui_marker():
     script = (STATIC / "assets" / "app.js").read_text(encoding="utf-8")
 
     assert 'request.headers["X-DataLab-UI"] = "browser"' in script
+
+
+def test_frontend_modules_and_api_follow_the_loaded_application_root():
+    script = (STATIC / "assets" / "app.js").read_text(encoding="utf-8")
+
+    assert 'from "./markdown.js"' in script
+    assert 'from "./ui-state.js"' in script
+    assert 'const APP_ROOT_URL = new URL("../", import.meta.url);' in script
+    assert "new URL(relativePath, APP_ROOT_URL)" in script

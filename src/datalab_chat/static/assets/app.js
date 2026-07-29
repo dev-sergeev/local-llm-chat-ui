@@ -1,4 +1,4 @@
-import { escapeHtml, renderMarkdown } from "/assets/markdown.js";
+import { escapeHtml, renderMarkdown } from "./markdown.js";
 import {
   deriveComposerState,
   mergeRejectedSubmissionDraft,
@@ -6,10 +6,11 @@ import {
   shouldPollConversation,
   shouldRefreshAcceptedSubmission,
   shouldRestoreRejectedSubmission,
-} from "/assets/ui-state.js";
+} from "./ui-state.js";
 
 const PENDING_STATUSES = new Set(["queued", "running", "retrying"]);
 const BOTTOM_PROXIMITY_PX = 180;
+const APP_ROOT_URL = new URL("../", import.meta.url);
 
 const elements = {
   sidebar: byId("sidebar"),
@@ -146,7 +147,8 @@ async function api(path, options = {}) {
     request.body = JSON.stringify(options.body ?? {});
   }
   try {
-    const response = await fetch(path, request);
+    const relativePath = path.replace(/^\/+/, "");
+    const response = await fetch(new URL(relativePath, APP_ROOT_URL), request);
     const contentType = response.headers.get("Content-Type") || "";
     const payload = contentType.includes("application/json") ? await response.json() : null;
     if (!response.ok) {

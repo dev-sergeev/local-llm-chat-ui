@@ -44,7 +44,10 @@ def running_server(tmp_path):
     (static / "index.html").write_text(
         "<!doctype html><title>DataLab</title>", encoding="utf-8"
     )
-    (static / "app.js").write_text("console.log('ok')", encoding="utf-8")
+    assets = static / "assets"
+    assets.mkdir()
+    (assets / "app.css").write_text("body { display: grid; }", encoding="utf-8")
+    (assets / "app.js").write_text("console.log('ok')", encoding="utf-8")
     app = ChatApplication(
         EnvProfileCatalog(tmp_path / ".env"),
         SQLiteChatMemory(tmp_path / "chat.db"),
@@ -101,6 +104,14 @@ def test_static_app_and_health_have_local_security_headers(running_server):
         assert "DataLab" in html
         assert "default-src 'self'" in response.headers["Content-Security-Policy"]
         assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+    for asset, expected_type in (
+        ("/assets/app.css", "text/css; charset=utf-8"),
+        ("/assets/app.js", "text/javascript; charset=utf-8"),
+    ):
+        with urlopen(running_server + asset, timeout=2) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == expected_type
 
 
 def test_complete_chat_flow_over_http_never_returns_token(running_server):

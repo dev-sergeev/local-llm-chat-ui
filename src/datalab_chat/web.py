@@ -33,6 +33,11 @@ LOGGER = logging.getLogger("datalab_chat.web")
 MAX_JSON_BODY = 1_000_000
 UI_REQUEST_HEADER = "X-DataLab-UI"
 UI_REQUEST_VALUE = "browser"
+STATIC_CONTENT_TYPES = {
+    ".css": "text/css",
+    ".html": "text/html",
+    ".js": "text/javascript",
+}
 
 
 class ChatHTTPServer(ThreadingHTTPServer):
@@ -58,7 +63,7 @@ def create_server(
     port: int = 8765,
 ) -> ChatHTTPServer:
     if host not in {"127.0.0.1", "localhost"}:
-        raise ValueError("DataLab Risk Chat can bind only to localhost")
+        raise ValueError("Local LLM Chat can bind only to localhost")
     if not 0 <= port <= 65535:
         raise ValueError("Port must be within [0, 65535]")
     directory = Path(static_dir)
@@ -453,9 +458,11 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
         except OSError:
             self._json_error(HTTPStatus.NOT_FOUND, "not_found", "Файл не найден.")
             return
-        content_type = (
-            mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-        )
+        content_type = STATIC_CONTENT_TYPES.get(candidate.suffix.lower())
+        if content_type is None:
+            content_type = (
+                mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            )
         self.send_response(HTTPStatus.OK)
         self.send_header(
             "Content-Type",

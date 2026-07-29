@@ -65,7 +65,7 @@ def test_module_starts_real_localhost_service_and_stops_cleanly(tmp_path):
 
         with urlopen(f"http://127.0.0.1:{port}/", timeout=1) as response:
             html = response.read().decode("utf-8")
-            assert "DataLab Risk Chat" in html
+            assert "Local LLM Chat" in html
         assert stat.S_IMODE((data_dir / "chat.db").stat().st_mode) == 0o600
         assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
     finally:

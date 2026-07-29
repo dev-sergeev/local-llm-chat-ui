@@ -4,17 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="description" content="Локальный чат DataLab Risk с корпоративными LLM">
-    <title>DataLab Risk Chat</title>
-    <link rel="stylesheet" href="/assets/app.css">
+    <meta name="description" content="Локальный чат с GigaChat и OpenAI-compatible LLM">
+    <title>Local LLM Chat</title>
+    <link rel="stylesheet" href="assets/app.css">
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar" aria-label="История диалогов">
         <div class="brand-row">
-          <div class="brand-mark" aria-hidden="true">DR</div>
+          <div class="brand-mark" aria-hidden="true">LC</div>
           <div class="brand-copy">
-            <strong>DataLab Risk</strong>
+            <strong>Local LLM Chat</strong>
             <span>Local AI workspace</span>
           </div>
           <button class="icon-button mobile-only" id="sidebar-close" type="button" aria-label="Закрыть меню">×</button>
@@ -71,10 +71,10 @@
 
         <section class="welcome-state" id="welcome-state">
           <div class="welcome-orbit" aria-hidden="true">
-            <div class="welcome-core">DR</div>
+            <div class="welcome-core">LC</div>
           </div>
-          <p class="eyebrow">DATA LAB · RISK</p>
-          <h1>Закрытый контур.<br>Открытый диалог.</h1>
+          <p class="eyebrow">LOCAL · LLM</p>
+          <h1>Локальные модели.<br>Удобный диалог.</h1>
           <p class="welcome-copy">Работайте с GigaChat и OpenAI-compatible моделями, сохраняя историю и секреты только на этом компьютере.</p>
           <div class="welcome-actions">
             <button class="button button-primary" id="welcome-new-chat" type="button">Начать диалог</button>
@@ -145,7 +145,7 @@
               </label>
               <label class="field">
                 <span>URL подключения</span>
-                <input name="base_url" type="url" maxlength="2048" required placeholder="Адрес API в закрытом контуре" autocomplete="off" spellcheck="false">
+                <input name="base_url" type="url" maxlength="2048" required placeholder="Адрес API модели" autocomplete="off" spellcheck="false">
               </label>
               <label class="field">
                 <span>Токен</span>
@@ -174,6 +174,6 @@
     </dialog>
 
     <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js"></script>
+    <script type="module" src="assets/app.js"></script>
   </body>
 </html>

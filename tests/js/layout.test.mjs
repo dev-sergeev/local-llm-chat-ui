@@ -234,12 +234,12 @@ test("a long chat scrolls inside the viewport and keeps the composer visible", a
     <div class="app-shell">
       <aside class="sidebar">История диалогов</aside>
       <main class="main-panel" id="main-panel">
-        <header class="topbar">DataLab Risk Chat</header>
+        <header class="topbar">Local LLM Chat</header>
         <section class="chat-view">
           <div class="messages" id="messages">
             <div class="messages-inner">
               <article class="message assistant">
-                <div class="message-avatar">DR</div>
+                <div class="message-avatar">LC</div>
                 <div class="message-card">
                   <div class="message-content">${paragraphs}</div>
                 </div>
