@@ -290,6 +290,118 @@ def test_mutations_reject_foreign_origin_and_non_json_body(running_server):
     assert caught.value.code == 415
 
 
+def test_mutations_accept_opaque_origin_from_loopback_ui(running_server):
+    blocked_status, _, blocked_error = request(
+        running_server,
+        "POST",
+        "/api/profiles",
+        {},
+        headers={"Origin": "null"},
+    )
+    assert blocked_status == 403
+    assert blocked_error["error"]["code"] == "forbidden_origin"
+
+    status, _, profile = request(
+        running_server,
+        "POST",
+        "/api/profiles",
+        {
+            "display_name": "Embedded browser",
+            "format": "openai",
+            "base_url": "https://gateway.bank.local/v1",
+            "token": "local-secret",
+            "model_id": "risk-model",
+        },
+        headers={"Origin": "null", "X-DataLab-UI": "browser"},
+    )
+
+    assert status == 201
+    assert profile["display_name"] == "Embedded browser"
+    assert "token" not in profile
+
+
+def test_mutations_accept_forwarded_origin_from_loopback_ui(running_server):
+    status, _, conversation = request(
+        running_server,
+        "POST",
+        "/api/conversations",
+        {},
+        headers={
+            "Origin": "http://127.0.0.1:49152",
+            "Sec-Fetch-Site": "same-origin",
+            "X-DataLab-UI": "browser",
+        },
+    )
+
+    assert status == 201
+    assert conversation["title"] == "Новый чат"
+
+
+def test_mutations_compare_origin_with_forwarded_loopback_host(running_server):
+    status, _, conversation = request(
+        running_server,
+        "POST",
+        "/api/conversations",
+        {},
+        headers={
+            "Host": "127.0.0.1:49152",
+            "Origin": "http://127.0.0.1:49152",
+            "Sec-Fetch-Site": "same-origin",
+        },
+    )
+
+    assert status == 201
+    assert conversation["title"] == "Новый чат"
+
+
+def test_cross_site_origin_stays_blocked_with_ui_marker(running_server):
+    for origin in (
+        "https://evil.example",
+        running_server.replace("127.0.0.1", "localhost"),
+    ):
+        status, _, error = request(
+            running_server,
+            "POST",
+            "/api/conversations",
+            {},
+            headers={
+                "Origin": origin,
+                "Sec-Fetch-Site": "cross-site",
+                "X-DataLab-UI": "browser",
+            },
+        )
+
+        assert status == 403
+        assert error["error"]["code"] == "forbidden_origin"
+
+
+def test_requests_reject_non_loopback_host(running_server):
+    status, _, error = request(
+        running_server,
+        "GET",
+        "/api/health",
+        headers={"Host": "rebinding.example"},
+    )
+
+    assert status == 403
+    assert error["error"]["code"] == "forbidden_host"
+
+    status, _, error = request(
+        running_server,
+        "POST",
+        "/api/profiles",
+        {},
+        headers={
+            "Host": "rebinding.example",
+            "Origin": "null",
+            "X-DataLab-UI": "browser",
+        },
+    )
+
+    assert status == 403
+    assert error["error"]["code"] == "forbidden_host"
+
+
 def test_unknown_and_traversal_paths_are_not_served(running_server):
     status, _, error = request(running_server, "GET", "/api/unknown")
     assert status == 404

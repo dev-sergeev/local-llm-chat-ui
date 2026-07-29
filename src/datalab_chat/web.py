@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import mimetypes
@@ -30,6 +31,8 @@ from datalab_chat.profiles import (
 
 LOGGER = logging.getLogger("datalab_chat.web")
 MAX_JSON_BODY = 1_000_000
+UI_REQUEST_HEADER = "X-DataLab-UI"
+UI_REQUEST_VALUE = "browser"
 
 
 class ChatHTTPServer(ThreadingHTTPServer):
@@ -102,11 +105,12 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
 
     def _handle(self, method: str) -> None:
         try:
+            request_host = self._validate_local_host()
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             if path.startswith("/api/") or path == "/api":
                 if method not in {"GET", "HEAD"}:
-                    self._validate_mutation_request()
+                    self._validate_mutation_request(request_host)
                 status, payload = self._dispatch_api(
                     method, path, parse_qs(parsed.query)
                 )
@@ -338,22 +342,27 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
             model_id=_required_string(body, "model_id"),
         )
 
-    def _validate_mutation_request(self) -> None:
+    def _validate_local_host(self) -> tuple[str, int | None]:
+        host_headers = self.headers.get_all("Host") or []
+        request_host = (
+            _parse_authority(host_headers[0]) if len(host_headers) == 1 else None
+        )
+        if request_host is None or not _is_loopback_hostname(request_host[0]):
+            raise RequestError(
+                HTTPStatus.FORBIDDEN,
+                "forbidden_host",
+                "Интерфейс доступен только через локальный адрес.",
+            )
+        return request_host
+
+    def _validate_mutation_request(self, request_host: tuple[str, int | None]) -> None:
         origin = self.headers.get("Origin")
-        if origin:
-            parsed = urlsplit(origin)
-            server_port = self.server.server_address[1]
-            expected_port = parsed.port or (443 if parsed.scheme == "https" else 80)
-            if (
-                parsed.scheme != "http"
-                or parsed.hostname not in {"127.0.0.1", "localhost"}
-                or expected_port != server_port
-            ):
-                raise RequestError(
-                    HTTPStatus.FORBIDDEN,
-                    "forbidden_origin",
-                    "Запрос пришёл не из локального интерфейса.",
-                )
+        if origin and not self._is_allowed_origin(origin, request_host):
+            raise RequestError(
+                HTTPStatus.FORBIDDEN,
+                "forbidden_origin",
+                "Запрос пришёл не из локального интерфейса.",
+            )
         content_type = self.headers.get_content_type()
         if content_type != "application/json":
             raise RequestError(
@@ -361,6 +370,33 @@ class ChatRequestHandler(BaseHTTPRequestHandler):
                 "json_required",
                 "Для изменения данных требуется application/json.",
             )
+
+    def _is_allowed_origin(
+        self, origin: str, request_host: tuple[str, int | None]
+    ) -> bool:
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if fetch_site in {"cross-site", "same-site"}:
+            return False
+        try:
+            parsed = urlsplit(origin)
+            origin_port = parsed.port
+        except ValueError:
+            return False
+
+        request_port = request_host[1] or self.server.server_address[1]
+        if (
+            parsed.scheme == "http"
+            and parsed.hostname is not None
+            and _is_loopback_hostname(parsed.hostname)
+            and (origin_port or 80) == request_port
+        ):
+            return True
+
+        # Some localhost preview/webview bridges serialize the page origin as
+        # ``null`` or as their own forwarding origin. The marker is a custom
+        # request header (therefore cross-origin browser code must preflight),
+        # while Fetch Metadata keeps an explicitly cross-site request blocked.
+        return self.headers.get(UI_REQUEST_HEADER) == UI_REQUEST_VALUE
 
     def _json_body(self) -> dict[str, Any]:
         raw_length = self.headers.get("Content-Length")
@@ -480,6 +516,33 @@ class RequestError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+def _parse_authority(authority: str) -> tuple[str, int | None] | None:
+    if not authority or any(character in authority for character in "/?#"):
+        return None
+    try:
+        parsed = urlsplit(f"//{authority}")
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return parsed.hostname, port
+
+
+def _is_loopback_hostname(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _required_string(body: dict[str, Any], key: str) -> str:

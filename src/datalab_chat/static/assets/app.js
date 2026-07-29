@@ -132,6 +132,7 @@ async function api(path, options = {}) {
   const request = { method, headers: { Accept: "application/json" } };
   if (!new Set(["GET", "HEAD"]).has(method)) {
     request.headers["Content-Type"] = "application/json";
+    request.headers["X-DataLab-UI"] = "browser";
     request.body = JSON.stringify(options.body ?? {});
   }
   try {

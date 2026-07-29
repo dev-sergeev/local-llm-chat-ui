@@ -1,6 +1,6 @@
 # Локальный HTTP-интерфейс
 
-Интерфейс обслуживается только на loopback. Изменяющие запросы требуют `Content-Type: application/json`; CORS не включён, чужой `Origin` отклоняется. Ошибки имеют форму:
+Интерфейс обслуживается только на loopback, а `Host` каждого прикладного запроса проверяется на loopback-адрес. Изменяющие запросы требуют `Content-Type: application/json`; CORS не включён, cross-site запросы отклоняются. Официальный browser UI добавляет `X-DataLab-UI: browser`: это позволяет работать через локальную browser-оболочку или preview-прокси, которые сохраняют loopback `Host`, но передают `Origin: null` либо собственный forwarding-origin. Запрос, явно помеченный браузером как `Sec-Fetch-Site: cross-site`, всё равно запрещён. Ошибки имеют форму:
 
 ```json
 {"error":{"code":"validation_error","message":"Проверьте заполненные поля."}}

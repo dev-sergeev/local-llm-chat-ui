@@ -75,3 +75,9 @@ def test_frontend_assets_are_self_contained_and_do_not_reference_cdn():
     assert "https://" not in combined
     assert "http://" not in combined
     assert "cdn" not in combined.lower()
+
+
+def test_mutating_requests_include_local_ui_marker():
+    script = (STATIC / "assets" / "app.js").read_text(encoding="utf-8")
+
+    assert 'request.headers["X-DataLab-UI"] = "browser"' in script
