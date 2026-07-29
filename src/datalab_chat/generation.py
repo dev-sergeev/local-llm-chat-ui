@@ -32,6 +32,7 @@ class GenerationPolicy:
     max_backoff_seconds: float = 8.0
     jitter_ratio: float = 0.2
     poll_interval_seconds: float = 0.1
+    max_concurrent_generations: int = 4
 
     def __post_init__(self) -> None:
         if self.total_timeout_seconds <= 0 or self.total_timeout_seconds > 600:
@@ -44,6 +45,8 @@ class GenerationPolicy:
             raise ValueError("Jitter ratio must be within [0, 1]")
         if self.poll_interval_seconds <= 0:
             raise ValueError("Poll interval must be positive")
+        if not 1 <= self.max_concurrent_generations <= 32:
+            raise ValueError("Concurrent generations must be within [1, 32]")
 
 
 @dataclass(slots=True)
@@ -58,6 +61,10 @@ class _Cancelled(Exception):
 
 class _DeadlineExceeded(Exception):
     pass
+
+
+class GenerationCapacityError(MemoryConflict):
+    """The bounded local generation executor has no free task slot."""
 
 
 class GenerationCoordinator:
@@ -93,6 +100,10 @@ class GenerationCoordinator:
         with self._lock:
             if generation_id in self._tasks:
                 raise MemoryConflict("Генерация уже запущена.")
+            if len(self._tasks) >= self._policy.max_concurrent_generations:
+                raise GenerationCapacityError(
+                    "Слишком много одновременных генераций. Повторите запрос позже."
+                )
             cancel_event = threading.Event()
             thread = threading.Thread(
                 target=self._run,
@@ -101,7 +112,11 @@ class GenerationCoordinator:
                 daemon=True,
             )
             self._tasks[generation_id] = _Task(thread=thread, cancel_event=cancel_event)
-            thread.start()
+            try:
+                thread.start()
+            except BaseException:
+                self._tasks.pop(generation_id, None)
+                raise
         return generation
 
     def cancel(self, generation_id: str) -> GenerationView:

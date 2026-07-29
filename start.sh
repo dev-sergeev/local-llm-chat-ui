@@ -19,8 +19,15 @@ if ! "$DATALAB_PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_inf
   exit 2
 fi
 
+DATALAB_BUNDLE_COMPATIBLE=0
+if "$DATALAB_PYTHON_BIN" -c 'import platform, sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and platform.system() == "Linux" and platform.machine().lower() in {"x86_64", "amd64"} else 1)'; then
+  DATALAB_BUNDLE_COMPATIBLE=1
+fi
+
 if [[ ! -x "$DATALAB_VENV_DIR/bin/python" ]]; then
-  if "$DATALAB_PYTHON_BIN" -c 'import langchain_gigachat, langchain_openai' >/dev/null 2>&1; then
+  if [[ "$DATALAB_BUNDLE_COMPATIBLE" -eq 1 ]]; then
+    "$DATALAB_PYTHON_BIN" -m venv "$DATALAB_VENV_DIR"
+  elif "$DATALAB_PYTHON_BIN" -c 'import langchain_gigachat, langchain_openai' >/dev/null 2>&1; then
     "$DATALAB_PYTHON_BIN" -m venv --system-site-packages "$DATALAB_VENV_DIR"
   else
     "$DATALAB_PYTHON_BIN" -m venv "$DATALAB_VENV_DIR"
@@ -35,10 +42,10 @@ if compgen -G "$DATALAB_WHEELHOUSE_DIR/*.whl" >/dev/null; then
     verify "$DATALAB_WHEELHOUSE_DIR"
 fi
 
-if ! "$DATALAB_VENV_DIR/bin/python" -c 'import langchain_gigachat, langchain_openai' >/dev/null 2>&1; then
+if [[ "$DATALAB_BUNDLE_COMPATIBLE" -eq 1 ]]; then
   if compgen -G "$DATALAB_WHEELHOUSE_DIR/*.whl" >/dev/null; then
-    if ! "$DATALAB_VENV_DIR/bin/python" -c 'import platform, sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) and platform.system() == "Linux" and platform.machine() in {"x86_64", "AMD64"} else 1)'; then
-      echo "Ошибка: встроенный wheelhouse рассчитан на CPython 3.11, Linux x86_64 (glibc 2.17+)." >&2
+    if ! "$DATALAB_VENV_DIR/bin/python" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)'; then
+      echo "Ошибка: существующее виртуальное окружение создано другой версией Python." >&2
       exit 2
     fi
     "$DATALAB_VENV_DIR/bin/python" -m pip install \
@@ -47,10 +54,12 @@ if ! "$DATALAB_VENV_DIR/bin/python" -c 'import langchain_gigachat, langchain_ope
       --requirement "$DATALAB_REQUIREMENTS_FILE"
     "$DATALAB_VENV_DIR/bin/python" -m pip check
   else
-    echo "Ошибка: LLM-библиотеки не найдены." >&2
-    echo "Добавьте Linux wheels в wheelhouse/ или установите зависимости в системный Python." >&2
+    echo "Ошибка: полный локальный wheelhouse не найден." >&2
     exit 2
   fi
+elif ! "$DATALAB_VENV_DIR/bin/python" -c 'import langchain_gigachat, langchain_openai' >/dev/null 2>&1; then
+  echo "Ошибка: встроенный wheelhouse рассчитан на CPython 3.11, Linux x86_64 (glibc 2.17+)." >&2
+  exit 2
 fi
 
 export PYTHONPATH="$DATALAB_PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"

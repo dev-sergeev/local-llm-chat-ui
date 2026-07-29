@@ -3,8 +3,14 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from datalab_chat.gateways import GatewayFailure
-from datalab_chat.generation import GenerationCoordinator, GenerationPolicy
+from datalab_chat.generation import (
+    GenerationCapacityError,
+    GenerationCoordinator,
+    GenerationPolicy,
+)
 from datalab_chat.memory import GenerationStatus, SQLiteChatMemory
 from datalab_chat.profiles import ModelConnection, ProfileFormat
 
@@ -235,3 +241,61 @@ def test_transport_chunks_cross_coordinator_boundary_without_partial_persistence
     assert memory.get_conversation(conversation.id).messages[-1].content == (
         "PD — вероятность дефолта"
     )
+
+
+def test_stuck_transports_cannot_create_unbounded_generation_threads(tmp_path):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    release = threading.Event()
+
+    def blocked_answer():
+        release.wait(1)
+        return "done"
+
+    gateway = ScriptedGateway([blocked_answer] * 4)
+    coordinator = GenerationCoordinator(
+        memory,
+        FixedFactory(gateway),
+        policy=policy(max_concurrent_generations=4),
+    )
+    generation_ids = []
+    for _ in range(4):
+        _, generation = new_generation(memory)
+        generation_ids.append(generation.id)
+        coordinator.submit(generation.id, CONNECTION)
+
+    _, overflow = new_generation(memory)
+    with pytest.raises(GenerationCapacityError):
+        coordinator.submit(overflow.id, CONNECTION)
+
+    generation_threads = [
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("generation-")
+    ]
+    assert len(generation_threads) <= 4
+    release.set()
+    for generation_id in generation_ids:
+        assert coordinator.wait(generation_id, timeout=1)
+
+
+def test_thread_start_failure_releases_generation_capacity(tmp_path, monkeypatch):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    _, generation = new_generation(memory)
+    coordinator = GenerationCoordinator(
+        memory,
+        FixedFactory(ScriptedGateway(["recovered"])),
+        policy=policy(max_concurrent_generations=1),
+    )
+    original_start = threading.Thread.start
+
+    def fail_start(_thread):
+        raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(threading.Thread, "start", fail_start)
+    with pytest.raises(RuntimeError, match="cannot start thread"):
+        coordinator.submit(generation.id, CONNECTION)
+
+    monkeypatch.setattr(threading.Thread, "start", original_start)
+    coordinator.submit(generation.id, CONNECTION)
+    assert coordinator.wait(generation.id, timeout=1)
+    assert memory.get_generation(generation.id).status is GenerationStatus.SUCCEEDED

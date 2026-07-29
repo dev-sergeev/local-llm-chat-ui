@@ -320,7 +320,8 @@ class SQLiteChatMemory:
             connection.execute(
                 """
                 UPDATE conversations
-                SET active_leaf_id = ?, active_profile_id = ?, title = ?, updated_at = ?
+                SET active_leaf_id = ?, active_profile_id = ?, title = ?,
+                    title_is_auto = 0, updated_at = ?
                 WHERE id = ?
                 """,
                 (message_id, profile_id, title, timestamp, conversation_id),
@@ -662,6 +663,11 @@ class SQLiteChatMemory:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 connection = self._connect()
                 try:
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
+                    if version not in (0, self._SCHEMA_VERSION):
+                        raise MemoryStorageError(
+                            "Версия локальной базы данных не поддерживается."
+                        )
                     connection.execute("PRAGMA journal_mode = WAL")
                     connection.executescript(
                         """
@@ -708,11 +714,6 @@ class SQLiteChatMemory:
                             ON generations(conversation_id, status, created_at);
                         """
                     )
-                    version = connection.execute("PRAGMA user_version").fetchone()[0]
-                    if version not in (0, self._SCHEMA_VERSION):
-                        raise MemoryStorageError(
-                            "Версия локальной базы данных не поддерживается."
-                        )
                     connection.execute(f"PRAGMA user_version = {self._SCHEMA_VERSION}")
                 finally:
                     connection.close()

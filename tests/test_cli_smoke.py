@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 import signal
 import socket
 import stat
@@ -9,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 from urllib.request import urlopen
+
+from datalab_chat.__main__ import _configure_logging
 
 
 def free_port():
@@ -71,3 +74,26 @@ def test_module_starts_real_localhost_service_and_stops_cleanly(tmp_path):
         output, _ = process.communicate(timeout=5)
 
     assert process.returncode == 0, output
+
+
+def test_external_http_clients_cannot_write_profile_urls_to_info_log(tmp_path):
+    root = logging.getLogger()
+    original_handlers = root.handlers[:]
+    original_level = root.level
+    external = logging.getLogger("httpx")
+    try:
+        _configure_logging(tmp_path)
+        external.warning("HTTP Request: POST https://secret.bank.local/v1")
+        logging.getLogger("datalab_chat").info("safe application event")
+        for handler in root.handlers:
+            handler.flush()
+        contents = (tmp_path / "app.log").read_text(encoding="utf-8")
+    finally:
+        for handler in root.handlers:
+            if handler not in original_handlers:
+                handler.close()
+        root.handlers = original_handlers
+        root.setLevel(original_level)
+
+    assert "secret.bank.local" not in contents
+    assert "safe application event" in contents

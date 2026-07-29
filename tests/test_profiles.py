@@ -136,6 +136,16 @@ def test_generated_env_is_safe_to_source_with_shell_metacharacters(tmp_path):
     assert catalog.resolve(profile.id).token == token
 
 
+def test_existing_env_permissions_are_restricted_when_catalog_is_read(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text('DATALAB_PROFILE_IDS=""\n', encoding="utf-8")
+    env_path.chmod(0o644)
+
+    EnvProfileCatalog(env_path).list()
+
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
+
 def test_delete_removes_profile_and_unknown_ids_are_explicit(tmp_path):
     catalog = EnvProfileCatalog(tmp_path / ".env")
     profile = catalog.create(draft("Temporary", ProfileFormat.GIGACHAT, "secret"))
@@ -155,6 +165,12 @@ def test_delete_removes_profile_and_unknown_ids_are_explicit(tmp_path):
         draft("", ProfileFormat.GIGACHAT, "token"),
         draft("Name", ProfileFormat.GIGACHAT, ""),
         draft("Name", ProfileFormat.GIGACHAT, "token", base_url="gateway.local"),
+        draft(
+            "Name",
+            ProfileFormat.GIGACHAT,
+            "token",
+            base_url="https://user:password@gateway.local/v1",
+        ),
         draft("Name", ProfileFormat.OPENAI, "token", model_id=""),
     ],
 )

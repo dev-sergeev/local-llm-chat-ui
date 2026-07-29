@@ -19,6 +19,27 @@ from datalab_chat.web import create_server
 
 
 LOGGER = logging.getLogger("datalab_chat")
+EXTERNAL_LOGGER_PREFIXES = (
+    "gigachat",
+    "httpcore",
+    "httpx",
+    "langchain",
+    "langchain_core",
+    "langchain_gigachat",
+    "langchain_openai",
+    "langsmith",
+    "openai",
+    "requests",
+    "urllib3",
+)
+
+
+class _ExternalLibraryLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not any(
+            record.name == prefix or record.name.startswith(f"{prefix}.")
+            for prefix in EXTERNAL_LOGGER_PREFIXES
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,6 +191,7 @@ def _configure_logging(data_dir: Path) -> None:
         pass
     for handler in handlers:
         handler.setFormatter(formatter)
+        handler.addFilter(_ExternalLibraryLogFilter())
     logger.handlers.clear()
     logger.handlers.extend(handlers)
 

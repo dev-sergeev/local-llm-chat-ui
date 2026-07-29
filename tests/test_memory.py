@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import sqlite3
 
 import pytest
 
@@ -8,6 +9,7 @@ from datalab_chat.memory import (
     GenerationStatus,
     MemoryConflict,
     MemoryNotFound,
+    MemoryStorageError,
     MemoryValidationError,
     SQLiteChatMemory,
 )
@@ -47,6 +49,35 @@ def test_conversation_survives_restart_with_model_snapshot(tmp_path):
     assert view.active_generation is None
     assert answer.model_snapshot == SNAPSHOT
     assert stat.S_IMODE(database.stat().st_mode) == 0o600
+
+
+def test_automatic_title_is_derived_once_from_the_first_message(tmp_path):
+    memory = SQLiteChatMemory(tmp_path / "chat.db")
+    conversation = memory.create_conversation("profile-a")
+    first = memory.begin_user_generation(conversation.id, "Первый вопрос", "profile-a")
+    complete(memory, first.id, "Первый ответ")
+
+    memory.begin_user_generation(conversation.id, "Второй вопрос", "profile-a")
+
+    assert memory.get_conversation(conversation.id).title == "Первый вопрос"
+
+
+def test_newer_database_version_is_rejected_without_schema_or_wal_mutation(tmp_path):
+    database = tmp_path / "chat.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version = 999")
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+    with pytest.raises(MemoryStorageError, match="Версия локальной базы данных"):
+        SQLiteChatMemory(database)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 999
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        tables = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    assert tables == []
 
 
 def test_edit_and_regenerate_create_navigable_branches(tmp_path):

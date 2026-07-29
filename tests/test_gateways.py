@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from datalab_chat.gateways import (
     GatewayFailure,
     GigaChatGateway,
     OpenAICompatibleGateway,
+    classify_gateway_exception,
 )
 from datalab_chat.profiles import ModelConnection, ProfileFormat
 
@@ -123,3 +125,18 @@ def test_adapter_rejects_empty_or_damaged_responses_without_retry(monkeypatch, c
 
     assert failure.value.code in {"empty_response", "invalid_response"}
     assert failure.value.retryable is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadError("connection closed"),
+        httpx.WriteError("socket unavailable"),
+        httpx.RemoteProtocolError("invalid peer response"),
+    ],
+)
+def test_transport_read_write_and_protocol_errors_are_retryable(error):
+    failure = classify_gateway_exception(error)
+
+    assert failure.code == "network"
+    assert failure.retryable is True

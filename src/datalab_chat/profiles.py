@@ -286,6 +286,10 @@ class EnvProfileCatalog:
             raise ProfileValidationError(
                 "URL профиля должен начинаться с http:// или https://."
             )
+        if parsed_url.username is not None or parsed_url.password is not None:
+            raise ProfileValidationError(
+                "URL профиля не должен содержать логин или пароль."
+            )
         if len(base_url) > 2048 or any(character in base_url for character in "\r\n\0"):
             raise ProfileValidationError("URL профиля содержит недопустимые символы.")
 
@@ -346,6 +350,7 @@ class EnvProfileCatalog:
         try:
             if not self.path.exists():
                 return ""
+            os.chmod(self.path, 0o600)
             return self.path.read_text(encoding="utf-8")
         except OSError as exc:
             raise ProfileStorageError("Не удалось прочитать локальный .env.") from exc
@@ -388,7 +393,14 @@ class EnvProfileCatalog:
                 os.fsync(handle.fileno())
             os.chmod(temporary_path, 0o600)
             os.replace(temporary_path, self.path)
-            os.chmod(self.path, 0o600)
+            directory_descriptor = os.open(
+                self.path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
         except OSError as exc:
             raise ProfileStorageError(
                 "Не удалось атомарно обновить локальный .env."

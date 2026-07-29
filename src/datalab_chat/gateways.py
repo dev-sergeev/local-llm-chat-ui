@@ -347,7 +347,16 @@ def classify_gateway_exception(exc: Exception) -> GatewayFailure:
             retryable=True,
         )
     if isinstance(exc, (ConnectionError, OSError)) or any(
-        marker in name for marker in ("connect", "network", "transport")
+        marker in name
+        for marker in (
+            "connect",
+            "network",
+            "protocolerror",
+            "proxyerror",
+            "readerror",
+            "transport",
+            "writeerror",
+        )
     ):
         return GatewayFailure(
             "network",

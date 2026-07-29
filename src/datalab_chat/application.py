@@ -10,7 +10,11 @@ from datalab_chat.gateways import (
     GatewayFailure,
     classify_gateway_exception,
 )
-from datalab_chat.generation import GenerationCoordinator, GenerationPolicy
+from datalab_chat.generation import (
+    GenerationCapacityError,
+    GenerationCoordinator,
+    GenerationPolicy,
+)
 from datalab_chat.memory import (
     ConversationSummary,
     ConversationView,
@@ -58,7 +62,8 @@ class ChatApplication:
         self._gateway_factory = gateway_factory
         resolved_policy = generation_policy or GenerationPolicy()
         self._caller = BoundedGatewayCaller(
-            poll_interval_seconds=resolved_policy.poll_interval_seconds
+            max_concurrent_calls=resolved_policy.max_concurrent_generations,
+            poll_interval_seconds=resolved_policy.poll_interval_seconds,
         )
         self._generations = GenerationCoordinator(
             memory,
@@ -291,6 +296,13 @@ class ChatApplication:
         try:
             self._generations.submit(generation.id, connection)
             return generation
+        except GenerationCapacityError as exc:
+            return self._memory.fail_generation(
+                generation.id,
+                error_code="generation_capacity",
+                error_message=str(exc),
+                attempts=0,
+            )
         except Exception:
             try:
                 self._memory.fail_generation(

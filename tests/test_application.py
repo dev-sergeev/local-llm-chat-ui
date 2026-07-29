@@ -251,6 +251,34 @@ def test_combined_conversation_update_is_atomic_when_profile_is_invalid(tmp_path
     app.shutdown()
 
 
+def test_capacity_overflow_is_saved_as_retryable_user_visible_generation(tmp_path):
+    release = threading.Event()
+
+    def blocked_answer():
+        release.wait(1)
+        return "done"
+
+    app, _, _ = make_app(tmp_path, [blocked_answer] * 4)
+    profile = add_profile(app)
+    active_generations = []
+    for _ in range(4):
+        conversation = app.create_conversation(profile.id)
+        active_generations.append(app.send_message(conversation.id, "Запрос"))
+
+    overflow_conversation = app.create_conversation(profile.id)
+    overflow = app.send_message(overflow_conversation.id, "Лишний запрос")
+
+    assert overflow.status is GenerationStatus.FAILED
+    assert overflow.error_code == "generation_capacity"
+    view = app.get_conversation(overflow_conversation.id)
+    assert [message.content for message in view.messages] == ["Лишний запрос"]
+    assert view.active_generation.id == overflow.id
+    release.set()
+    for generation in active_generations:
+        assert wait_terminal(app, generation.id).status is GenerationStatus.SUCCEEDED
+    app.shutdown()
+
+
 def test_application_recovers_unfinished_work_on_start(tmp_path):
     env = EnvProfileCatalog(tmp_path / ".env")
     memory = SQLiteChatMemory(tmp_path / "chat.db")
